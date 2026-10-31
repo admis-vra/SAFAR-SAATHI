@@ -13,6 +13,8 @@ export default function Login() {
   const [error, setError] = useState('')
   const [info, setInfo] = useState('')
   const [busy, setBusy] = useState(false)
+  const [unconfirmedEmail, setUnconfirmedEmail] = useState('')
+  const [resent, setResent] = useState(false)
 
   useEffect(() => {
     api('/routes').then(setRoutes).catch(() => {})
@@ -26,6 +28,8 @@ export default function Login() {
     e.preventDefault()
     setError('')
     setInfo('')
+    setUnconfirmedEmail('')
+    setResent(false)
     setBusy(true)
     try {
       if (registering) {
@@ -56,7 +60,26 @@ export default function Login() {
         if (err) throw err
       }
     } catch (err) {
-      setError(/fetch/i.test(err.message) ? 'Cannot reach the login server. Check your internet connection.' : err.message)
+      if (/email not confirmed/i.test(err.message)) {
+        setError('Your email is not confirmed yet. Check your inbox for the confirmation link, or resend it below.')
+        setUnconfirmedEmail(form.email.trim())
+      } else {
+        setError(/fetch/i.test(err.message) ? 'Cannot reach the login server. Check your internet connection.' : err.message)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const resendConfirmation = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      const { error: err } = await supabase.auth.resend({ type: 'signup', email: unconfirmedEmail })
+      if (err) throw err
+      setResent(true)
+    } catch (err) {
+      setError(err.message)
     } finally {
       setBusy(false)
     }
@@ -67,6 +90,8 @@ export default function Login() {
     setMode('login')
     setError('')
     setInfo('')
+    setUnconfirmedEmail('')
+    setResent(false)
     setForm(EMPTY)
   }
 
@@ -145,6 +170,12 @@ export default function Login() {
 
           {error && <div className="alert bad" role="alert">{error}</div>}
           {info && <div className="alert good" role="status">{info}</div>}
+          {unconfirmedEmail && !resent && (
+            <button type="button" className="link" onClick={resendConfirmation} disabled={busy}>
+              Resend confirmation email
+            </button>
+          )}
+          {resent && <div className="alert good" role="status">Confirmation email sent again. Check your inbox.</div>}
 
           <button className="btn primary block" disabled={busy}>
             {busy ? 'Please wait…' : registering ? 'Create account' : 'Log in'}
@@ -154,7 +185,7 @@ export default function Login() {
             <p className="center muted small-text">
               {registering ? 'Already registered? ' : 'New here? '}
               <button type="button" className="link"
-                onClick={() => { setMode(registering ? 'login' : 'register'); setError(''); setInfo('') }}>
+                onClick={() => { setMode(registering ? 'login' : 'register'); setError(''); setInfo(''); setUnconfirmedEmail(''); setResent(false) }}>
                 {registering ? 'Log in' : 'Create an account'}
               </button>
             </p>
