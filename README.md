@@ -198,20 +198,29 @@ Base URL: `http://<host>:8000`. All JSON. 🔒 = needs `Authorization: Bearer <S
  "eta": {"scheduled": "13:15", "predicted": "13:18", "delay_min": 3.2, "source": "model|baseline|timetable"},
  "updated_at": "2026-10-31T13:02:11",
  "device": {"id": "B-14", "online": true, "last_reading": "2026-10-31T07:32:10+00:00", "ir_net": 28},
- "trip": {"id": 42, "in_depot": false, "at_stop": "E"}, "sos": false}
+ "trip": {"id": 42, "in_depot": false, "at_stop": "E"}, "sos": false,
+ "fusion": {"mode": "cv", "ir_empty": 10, "camera_empty": 14, "deviation": 4, "ir_offset": 0, "stationary_s": 12}}
 ```
-
-Occupancy = the latest people count from the bus (IR door counter or camera, whichever reported last; M4 adds
-proper fusion), otherwise students allocated to it.
 
 `seats_free` comes from the best source available, named in `seat_source`:
 
 | `seat_source` | Meaning |
 |---|---|
+| `fused` | IR door counter **and** camera both fresh. Stationary (under 3 km/h for 5 s or more): camera; moving: IR (`fusion.mode` = `cv` / `ir`) |
+| `ir_count` | Only the IR counter is fresh: `capacity − (IR net + offset)` |
 | `camera` | Seat map covers the whole bus; empty seats detected directly |
 | `camera_partial` | Seat map covers `seats_seen` of `capacity` seats; unseen seats assumed to fill at the same rate (an estimate — show "~" in the UI) |
 | `people_count` | No seat map; `capacity − people counted` |
 | `allocations` | No camera; `capacity − students allocated` |
+
+**Sensor fusion (IR + camera):** IR break-beams double-count people crowding the door; the camera misses people
+who are blocked from view. So the bus trusts the camera at rest and the IR counter on the move. "Fresh" means IR
+heard within 10 s (it reports every 2 s) and camera within 45 s (`count.py` reports every 30 s). If the two
+disagree by more than 4 seats after 10 s at rest, the IR count is re-anchored to the camera (`ir_offset`), and that
+is logged as a `fusion_recalibrated` trip event. The offset resets when a trip **ends**, not when it starts,
+because a trip starts when the bus leaves campus, i.e. after boarding, which is when calibration is best. Fused results are
+stored in `bus_live_state.fused_seats_free` and `telemetry.fused_seats_free`. Fusion **accuracy on real footage
+is not measured** yet; the tests use synthetic sequences.
 
 ## Demo script (what judges should see)
 

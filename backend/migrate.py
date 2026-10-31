@@ -21,7 +21,7 @@ create table if not exists auth.users (id uuid primary key);
 """
 
 
-async def apply(dsn: str, local_auth_stub: bool = False) -> list[str]:
+async def apply(dsn: str, local_auth_stub: bool = False, only: str | None = None) -> list[str]:
     conn = await asyncpg.connect(dsn, statement_cache_size=0)
     try:
         has_auth = await conn.fetchval("select to_regclass('auth.users') is not null")
@@ -39,7 +39,7 @@ async def apply(dsn: str, local_auth_stub: bool = False) -> list[str]:
         done = {r["version"] for r in await conn.fetch("select version from schema_migrations")}
         applied = []
         for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.stem in done:
+            if path.stem in done or (only and path.stem != only):
                 continue
             async with conn.transaction():
                 await conn.execute(path.read_text(encoding="utf-8"))
@@ -53,12 +53,13 @@ async def apply(dsn: str, local_auth_stub: bool = False) -> list[str]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--local-auth-stub", action="store_true")
+    ap.add_argument("--only", metavar="NAME", help="apply just this migration (file name without .sql)")
     args = ap.parse_args()
     load_dotenv(HERE / ".env")
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         raise SystemExit("Set DATABASE_URL in backend/.env")
-    applied = asyncio.run(apply(dsn, args.local_auth_stub))
+    applied = asyncio.run(apply(dsn, args.local_auth_stub, args.only))
     print("applied:", ", ".join(applied) if applied else "nothing (already up to date)")
 
 

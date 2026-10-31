@@ -4,11 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from conftest import TEST_DSN, execute, fetch, run, token
+from conftest import SKIP_MIGRATE, TEST_DSN, execute, fetch, run, token
 
 MIGRATIONS = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
 
 
+@pytest.mark.skipif(SKIP_MIGRATE, reason="TEST_SKIP_MIGRATE=1: would apply pending migrations")
 def test_migrations_tracked_and_reapply_cleanly():
     import migrate
     assert run(migrate.apply(TEST_DSN, local_auth_stub=os.environ.get("TEST_AUTH_STUB") == "1")) == []

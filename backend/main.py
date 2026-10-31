@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 import db
+import fusion
 import ingest
 from auth import current_user
 from eta import predict_delay_minutes
@@ -160,10 +161,20 @@ hub = Hub()
 
 
 def occupancy(bus: dict) -> int:
+    f = fusion.compute(bus, time.monotonic())
+    if f.mode == "cv":
+        return bus["capacity"] - f.visual_empty
+    if f.mode in ("ir", "ir_only"):
+        return fusion.ir_people(bus)
     return bus["count"] if bus["count"] is not None else bus["assigned"]
 
 
 def seat_source(bus: dict) -> str:
+    mode = fusion.compute(bus, time.monotonic()).mode
+    if mode in ("cv", "ir"):
+        return "fused"
+    if mode == "ir_only":
+        return "ir_count"
     cam = bus["seat_cam"]
     if cam:
         return "camera" if cam["total"] >= bus["capacity"] else "camera_partial"
@@ -171,6 +182,9 @@ def seat_source(bus: dict) -> str:
 
 
 def seats_free(bus: dict) -> int:
+    f = fusion.compute(bus, time.monotonic())
+    if f.mode != "none":
+        return f.seats_free
     cam = bus["seat_cam"]
     if cam:
         if cam["total"] >= bus["capacity"]:
@@ -190,6 +204,7 @@ def eta(bus: dict) -> dict:
 
 
 def bus_view(bus: dict) -> dict:
+    f = fusion.compute(bus, time.monotonic())
     return {
         "id": bus["id"], "route_id": bus["route_id"], "gate": bus["gate"], "stops": bus["stops"],
         "capacity": bus["capacity"], "occupancy": occupancy(bus), "seats_free": seats_free(bus),
@@ -209,6 +224,10 @@ def bus_view(bus: dict) -> dict:
                             None) if bus.get("fence") else None,
         },
         "sos": bool(bus.get("sos_incident")),
+        "fusion": {
+            "mode": f.mode, "ir_empty": f.expected_empty, "camera_empty": f.visual_empty,
+            "deviation": f.deviation, "ir_offset": bus.get("ir_offset", 0), "stationary_s": round(f.stationary_s),
+        },
     }
 
 
@@ -269,16 +288,34 @@ async def apply_device_telemetry(device_id: str, items: list[ingest.Telemetry], 
         if latest.has_fix:
             bus["location"] = {"lat": latest.gps.lat, "lng": latest.gps.lon}
         bus["speed_kmh"] = latest.gps.speed
+        if latest.gps.speed < fusion.STATIONARY_KMH:
+            bus["stationary_since"] = bus.get("stationary_since") or latest.ts
+        else:
+            bus["stationary_since"] = None
         bus["ir_net"] = latest.pax.net_current
-        bus["count"] = max(latest.pax.net_current, 0)
+        bus["ir_seen"] = time.monotonic()
+        await maybe_recalibrate(bus)
+        bus["count"] = fusion.ir_people(bus)
         bus["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        bus["fused_seats_free"] = seats_free(bus)
         await db.save_live_state(bus)
+        await db.set_fused_seats(bus["id"], latest.ts, bus["fused_seats_free"])
         await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     return {"accepted": len(fresh), "duplicates": len(items) - len(fresh), "live_updated": live}
 
 
 def is_late(ts: datetime) -> bool:
     return (datetime.now(timezone.utc) - ts).total_seconds() > LATE_AFTER_S
+
+
+async def maybe_recalibrate(bus: dict):
+    before = bus.get("ir_offset", 0)
+    f = fusion.compute(bus, time.monotonic())
+    new_offset = fusion.recalibrate(bus, time.monotonic())
+    if new_offset is not None and new_offset != before:
+        await db.insert_trip_event(
+            bus["id"], bus.get("trip_id"), "fusion_recalibrated", datetime.now(timezone.utc),
+            detail=f"IR said {f.expected_empty} empty, camera {f.visual_empty}; IR offset {before} -> {new_offset}")
 
 
 async def start_trip(bus: dict):
@@ -290,6 +327,9 @@ async def end_trip(bus: dict):
     await db.close_trip(bus["id"])
     bus["trip_id"] = None
     bus["status"] = "scheduled"
+    # Reset the IR baseline at the END of a trip, not the start: a trip "starts" only when the bus leaves
+    # campus, i.e. after boarding, which is exactly when the camera calibration is best.
+    bus["ir_offset"] = 0
 
 
 async def run_geofence(bus: dict, readings: list[ingest.Telemetry]) -> bool:
@@ -500,8 +540,11 @@ def allocate_view(student: dict) -> dict:
 @app.post("/buses/{bus_id}/count")
 async def report_count(bus_id: int, body: CountIn):
     bus = buses.get(bus_id) or _404()
-    bus["count"] = body.count
+    bus["count"] = bus["cv_count"] = body.count
     bus["seat_cam"] = {"free": body.seats_free, "total": body.seats_total} if body.seats_total else None
+    bus["cv_seen"] = time.monotonic()
+    await maybe_recalibrate(bus)
+    bus["fused_seats_free"] = seats_free(bus)
     await persist(bus)
     await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     if seats_free(bus) == 0:

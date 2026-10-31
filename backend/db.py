@@ -46,7 +46,7 @@ async def load_buses() -> list[dict]:
                b.mqtt_device_id,
                s.status, st_y(s.location::geometry) as lat, st_x(s.location::geometry) as lng,
                s.speed_kmh, s.people_count, s.cam_seats_free, s.cam_seats_total, s.ir_net, s.last_device_ts,
-               s.updated_at,
+               s.ir_offset, s.fused_seats_free, s.updated_at,
                (select t.id from active_trips t where t.bus_id = b.id and t.end_time is null) as trip_id
         from buses b left join bus_live_state s on s.bus_id = b.id
         order by b.id""")
@@ -58,6 +58,7 @@ async def load_buses() -> list[dict]:
         "location": {"lat": r["lat"], "lng": r["lng"]} if r["lat"] is not None else None,
         "speed_kmh": r["speed_kmh"],
         "count": r["people_count"], "ir_net": r["ir_net"], "last_device_ts": r["last_device_ts"],
+        "ir_offset": r["ir_offset"] or 0, "fused_seats_free": r["fused_seats_free"],
         "seat_cam": ({"free": r["cam_seats_free"], "total": r["cam_seats_total"]}
                      if r["cam_seats_total"] else None),
         "updated_at": r["updated_at"].isoformat(timespec="seconds") if r["updated_at"] else None,
@@ -70,19 +71,24 @@ async def save_live_state(bus: dict):
     cam = bus["seat_cam"] or {}
     await pool.execute("""
         insert into bus_live_state (bus_id, status, location, speed_kmh, people_count, cam_seats_free,
-                                    cam_seats_total, ir_net, last_device_ts, updated_at)
+                                    cam_seats_total, ir_net, last_device_ts, ir_offset, fused_seats_free, updated_at)
         values ($1, $2::bus_status,
                 case when $3::float8 is null then null
                      else st_setsrid(st_makepoint($4::float8, $3::float8), 4326)::geography end,
-                $5, $6, $7, $8, $9, $10, now())
+                $5, $6, $7, $8, $9, $10, $11, $12, now())
         on conflict (bus_id) do update set
           status = excluded.status, location = excluded.location, speed_kmh = excluded.speed_kmh,
           people_count = excluded.people_count, cam_seats_free = excluded.cam_seats_free,
           cam_seats_total = excluded.cam_seats_total, ir_net = excluded.ir_net,
-          last_device_ts = excluded.last_device_ts, updated_at = excluded.updated_at""",
+          last_device_ts = excluded.last_device_ts, ir_offset = excluded.ir_offset,
+          fused_seats_free = excluded.fused_seats_free, updated_at = excluded.updated_at""",
         bus["id"], bus["status"], loc["lat"] if loc else None, loc["lng"] if loc else None,
         bus.get("speed_kmh"), bus["count"], cam.get("free"), cam.get("total"), bus.get("ir_net"),
-        bus.get("last_device_ts"))
+        bus.get("last_device_ts"), bus.get("ir_offset", 0), bus.get("fused_seats_free"))
+
+
+async def set_fused_seats(bus_id: int, ts: datetime, seats: int | None):
+    await pool.execute("update telemetry set fused_seats_free = $3 where bus_id = $1 and ts = $2", bus_id, ts, seats)
 
 
 async def insert_device_telemetry(bus_id: int, trip_id: int | None, items: list, from_backlog: bool) -> set:
@@ -183,14 +189,15 @@ async def insert_telemetry(bus: dict, ts: datetime, from_backlog: bool = False):
     loc = bus["location"]
     cam = bus["seat_cam"] or {}
     await pool.execute("""
-        insert into telemetry (bus_id, ts, trip_id, location, people_count, cv_seats_free, from_backlog)
+        insert into telemetry (bus_id, ts, trip_id, location, people_count, cv_seats_free, fused_seats_free,
+                               from_backlog)
         values ($1, $2, $3,
                 case when $4::float8 is null then null
                      else st_setsrid(st_makepoint($5::float8, $4::float8), 4326)::geography end,
-                $6, $7, $8)
+                $6, $7, $8, $9)
         on conflict (bus_id, ts) do nothing""",
         bus["id"], ts, bus.get("trip_id"), loc["lat"] if loc else None, loc["lng"] if loc else None,
-        bus["count"], cam.get("free"), from_backlog)
+        bus["count"], cam.get("free"), bus.get("fused_seats_free"), from_backlog)
 
 
 async def open_trip(bus: dict) -> int:

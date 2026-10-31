@@ -67,8 +67,14 @@ def execute(sql, *args):
     return run(_execute(sql, *args))
 
 
+SKIP_MIGRATE = os.environ.get("TEST_SKIP_MIGRATE") == "1"
+
+
 @pytest.fixture(scope="session", autouse=True)
 def migrated():
+    # TEST_SKIP_MIGRATE=1: don't apply pending migrations (e.g. another branch's unfinished one).
+    if SKIP_MIGRATE:
+        return
     import migrate
     run(migrate.apply(TEST_DSN, local_auth_stub=os.environ.get("TEST_AUTH_STUB") == "1"))
 
