@@ -6,7 +6,9 @@ import os
 import random
 import time
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +21,7 @@ import queueing
 import stop_eta
 from auth import current_user
 from eta import predict_delay_minutes
-from geofence import BusFence, Zone
+from geofence import BusFence, Zone, distance_m
 
 log = logging.getLogger("safarsaathi")
 
@@ -141,8 +143,15 @@ class CountIn(BaseModel):
 
 
 class LocationIn(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    speed_kmh: float | None = Field(default=None, ge=0, le=150)
+    accuracy_m: float | None = Field(default=None, ge=0)
+
+
+PHONE_MAX_ACCURACY_M = 100  # coarser fixes (Wi-Fi / cell towers) would make the bus jump around
+DEVICE_GPS_PRIORITY_S = 30  # a fresh fix from the bus's own GPS device wins over a phone
+LIVE_LOCATION_S = 120       # a position older than this is "last seen", not live
 
 
 class StatusIn(BaseModel):
@@ -217,6 +226,8 @@ def bus_view(bus: dict) -> dict:
         "capacity": bus["capacity"], "occupancy": occupancy(bus), "seats_free": seats_free(bus),
         "seat_source": seat_source(bus), "seats_seen": bus["seat_cam"]["total"] if bus["seat_cam"] else None,
         "status": bus["status"], "location": bus["location"], "speed_kmh": bus.get("speed_kmh"),
+        "location_source": bus.get("location_source"),
+        "location_at": bus["location_at"].isoformat(timespec="seconds") if bus.get("location_at") else None,
         "eta": eta(bus), "updated_at": bus["updated_at"],
         "device": {
             "id": bus.get("device_id"),
@@ -257,6 +268,7 @@ def allocate(student: dict) -> dict:
 
 async def persist(bus: dict, telemetry: bool = True):
     now = datetime.now(timezone.utc)
+
     bus["updated_at"] = now.astimezone().isoformat(timespec="seconds")
     await db.save_live_state(bus)
     if telemetry:
@@ -294,6 +306,7 @@ async def apply_device_telemetry(device_id: str, items: list[ingest.Telemetry], 
         bus["last_device_ts"] = latest.ts
         if latest.has_fix:
             bus["location"] = {"lat": latest.gps.lat, "lng": latest.gps.lon}
+            bus["location_source"], bus["location_at"] = "device", datetime.now(timezone.utc)
         bus["speed_kmh"] = latest.gps.speed
         if latest.gps.speed < fusion.STATIONARY_KMH:
             bus["stationary_since"] = bus.get("stationary_since") or latest.ts
@@ -581,8 +594,16 @@ def my_stop_eta(bus: dict, stop: str) -> dict | None:
     if stop not in names:
         return None
     now = queueing.now_ist()
-    sched = datetime.combine(now.date(), datetime.strptime(eta(bus)["predicted"], "%H:%M").time(), tzinfo=queueing.IST)
     loc = bus["location"]
+    fresh = bus.get("location_at") and 0 <= (now - bus["location_at"]).total_seconds() < LIVE_LOCATION_S
+    in_depot = bus.get("fence") is not None and "depot" in bus["fence"].inside
+    if bus["status"] != "departed" and fresh and not in_depot:
+        # Out on the road but not on a trip from campus (e.g. the morning run in). Stop ETAs only model
+        # trips leaving campus, so give the honest distance instead of a made-up time.
+        stop_pt = path[1 + names.index(stop)]
+        return {"basis": "on_road", "passed": False, "minutes": None, "at": None,
+                "distance_m": round(distance_m(loc["lat"], loc["lng"], *stop_pt))}
+    sched = datetime.combine(now.date(), datetime.strptime(eta(bus)["predicted"], "%H:%M").time(), tzinfo=queueing.IST)
     return stop_eta.stop_eta(path, 1 + names.index(stop), (loc["lat"], loc["lng"]) if loc else None,
                              bus.get("speed_kmh"), bus["status"] == "departed", sched, now)
 
@@ -627,13 +648,38 @@ async def report_count(bus_id: int, body: CountIn):
     return bus_view(bus)
 
 
+@dataclass
+class _Fix:
+    """A phone GPS fix shaped like the device readings run_geofence expects."""
+    ts: datetime
+    gps: SimpleNamespace
+    has_fix: bool = True
+
+
 @app.post("/buses/{bus_id}/location")
 async def report_location(bus_id: int, body: LocationIn, _: dict = Depends(require_bus_staff)):
+    """Driver's phone as the bus GPS: moves the bus, starts and ends trips through the same geofences."""
     bus = buses.get(bus_id) or _404()
-    bus["location"] = body.model_dump()
+    now = datetime.now(timezone.utc)
+
+    if body.accuracy_m is not None and body.accuracy_m > PHONE_MAX_ACCURACY_M:
+        return {"accepted": False, "reason": f"GPS too rough ({round(body.accuracy_m)} m). Waiting for a better fix."}
+    if bus.get("location_source") == "device" and (now - bus["location_at"]).total_seconds() < DEVICE_GPS_PRIORITY_S:
+        return {"accepted": False, "reason": "The bus's own GPS device is reporting; it takes priority."}
+
+    speed = body.speed_kmh
+    prev = bus["location"]
+    if speed is None and prev and bus.get("location_source") == "phone" and bus.get("location_at"):
+        secs = (now - bus["location_at"]).total_seconds()
+        if 0 < secs < 120:
+            speed = round(distance_m(prev["lat"], prev["lng"], body.lat, body.lng) / secs * 3.6, 1)
+    bus["location"] = {"lat": body.lat, "lng": body.lng}
+    bus["location_source"], bus["location_at"] = "phone", now
+    bus["speed_kmh"] = speed
+    await run_geofence(bus, [_Fix(now, SimpleNamespace(lat=body.lat, lon=body.lng))])
     await persist(bus)
     await hub.broadcast({"type": "bus", "data": bus_view(bus)})
-    return bus_view(bus)
+    return {"accepted": True, "bus": bus_view(bus)}
 
 
 @app.post("/buses/{bus_id}/status")

@@ -9,6 +9,7 @@ import Announcements from '../components/Announcements'
 import { enqueue, flush, pending } from '../outbox'
 
 const GPS_SEND_MS = 5000
+const GPS_HEARTBEAT_MS = 15000
 const SIM_STEP_MS = 3000
 const SOS_HOLD_MS = 2000
 
@@ -95,6 +96,8 @@ export default function Staff() {
           </div>
         </section>
 
+        {isDriver && <GpsShare busId={bus.id} onError={fail} />}
+
         <TripState bus={bus} />
 
         {(bus.status === 'scheduled' || bus.status === 'boarding') && (
@@ -122,7 +125,7 @@ export default function Staff() {
           </div>
         </details>
 
-        {isDriver ? <GpsShare busId={bus.id} onError={fail} /> : <ManualCount bus={bus} onError={fail} />}
+        {!isDriver && <ManualCount bus={bus} onError={fail} />}
 
         <section className="card" id="live-map">
           <div className="eyebrow">Live map</div>
@@ -321,70 +324,138 @@ function BigButton({ en, hi, tone, active, onClick }) {
   )
 }
 
+const GPS_KEY = (busId) => `safarsaathi.gps.${busId}`
+
+// Keep the phone screen on while sharing: browsers pause GPS for pages in the background.
+function useWakeLock(active) {
+  useEffect(() => {
+    if (!active || !('wakeLock' in navigator)) return
+    let lock = null
+    let gone = false
+    const grab = async () => {
+      try {
+        lock = await navigator.wakeLock.request('screen')
+      } catch {
+        lock = null
+      }
+    }
+    const onVisible = () => { if (document.visibilityState === 'visible' && !gone) grab() }
+    grab()
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      gone = true
+      document.removeEventListener('visibilitychange', onVisible)
+      lock?.release().catch(() => {})
+    }
+  }, [active])
+}
+
 function GpsShare({ busId, onError }) {
-  const [mode, setMode] = useState('off')
+  // Once a driver turns sharing on, it resumes by itself every time the app opens.
+  const [mode, setMode] = useState(() => (localStorage.getItem(GPS_KEY(busId)) === 'gps' ? 'gps' : 'off'))
   const [last, setLast] = useState(null)
+  const [fix, setFix] = useState(null)
+  const [note, setNote] = useState('')
   const [gpsError, setGpsError] = useState('')
   const lastSent = useRef(0)
+  const lastFix = useRef(null)
   const gpsAvailable = window.isSecureContext && 'geolocation' in navigator
+  useWakeLock(mode !== 'off')
 
-  const send = useCallback(async (lat, lng) => {
+  const choose = (m) => {
+    setGpsError('')
+    setNote('')
+    setMode(m)
+    if (m === 'gps') localStorage.setItem(GPS_KEY(busId), 'gps')
+    else localStorage.removeItem(GPS_KEY(busId))
+  }
+
+  const send = useCallback(async (body) => {
+    lastSent.current = Date.now()
     try {
-      await api(`/buses/${busId}/location`, { method: 'POST', body: { lat, lng } })
-      setLast(new Date())
+      const res = await api(`/buses/${busId}/location`, { method: 'POST', body })
+      setNote(res.accepted ? '' : res.reason)
+      if (res.accepted) setLast(new Date())
     } catch (err) {
-      onError(err)
+      if (err.status === 0) setNote('No network. Will keep trying.')
+      else onError(err)
     }
   }, [busId, onError])
 
   useEffect(() => {
     if (mode === 'gps') {
+      if (!gpsAvailable) return
       const id = navigator.geolocation.watchPosition(
         (pos) => {
-          if (Date.now() - lastSent.current < GPS_SEND_MS) return
-          lastSent.current = Date.now()
-          send(pos.coords.latitude, pos.coords.longitude)
+          const c = pos.coords
+          lastFix.current = {
+            lat: c.latitude, lng: c.longitude, accuracy_m: c.accuracy,
+            speed_kmh: c.speed != null && c.speed >= 0 ? +(c.speed * 3.6).toFixed(1) : null,
+          }
+          setFix(lastFix.current)
+          if (Date.now() - lastSent.current >= GPS_SEND_MS) send(lastFix.current)
         },
-        (err) => { setGpsError(err.message); setMode('off') },
-        { enableHighAccuracy: true, maximumAge: 5000 },
+        (err) => {
+          setGpsError(err.code === err.PERMISSION_DENIED
+            ? 'Location permission is blocked. Allow it for this site in the browser settings.'
+            : err.message)
+          if (err.code === err.PERMISSION_DENIED) {
+            localStorage.removeItem(GPS_KEY(busId))
+            setMode('off')
+          }
+        },
+        { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 },
       )
-      return () => navigator.geolocation.clearWatch(id)
+      // A parked bus gives no new fixes: re-send the last one so riders see it is still live.
+      const beat = setInterval(() => {
+        if (lastFix.current && Date.now() - lastSent.current >= GPS_HEARTBEAT_MS) send(lastFix.current)
+      }, 5000)
+      return () => { navigator.geolocation.clearWatch(id); clearInterval(beat) }
     }
     if (mode === 'demo') {
       let i = 0
-      const step = () => { send(...DEMO_PATH[i]); i = (i + 1) % DEMO_PATH.length }
+      const step = () => { send({ lat: DEMO_PATH[i][0], lng: DEMO_PATH[i][1] }); i = (i + 1) % DEMO_PATH.length }
       step()
       const id = setInterval(step, SIM_STEP_MS)
       return () => clearInterval(id)
     }
-  }, [mode, send])
+  }, [mode, send, gpsAvailable, busId])
 
   return (
-    <section className="card">
+    <section className={`card gps-card ${mode !== 'off' ? 'on' : ''}`}>
       <div className="row-between">
         <div>
           <div className="eyebrow">Live location · <span lang="hi">लोकेशन शेयर</span></div>
           <div className={mode === 'off' ? 'muted' : 'good-text'}>
-            {mode === 'off' ? 'Not sharing' : mode === 'gps' ? 'Sharing phone GPS' : 'Sharing demo route'}
-            {last && mode !== 'off' && <span className="muted tiny"> · last sent {last.toLocaleTimeString()}</span>}
+            {mode === 'off' ? 'Not sharing. Students can’t see your bus.' : mode === 'gps' ? 'Students can see your bus live' : 'Sharing demo route'}
           </div>
+          {mode !== 'off' && (
+            <div className="tiny muted">
+              {last ? `Last sent ${last.toLocaleTimeString()}` : 'Waiting for GPS…'}
+              {fix && mode === 'gps' && ` · ±${Math.round(fix.accuracy_m)} m`}
+              {fix?.speed_kmh != null && mode === 'gps' && ` · ${Math.round(fix.speed_kmh)} km/h`}
+            </div>
+          )}
         </div>
+        {mode !== 'off' && <span className="live-dot on">Live</span>}
       </div>
       <div className="row gap">
         {mode === 'off' ? (
           <>
-            <button className="btn primary" disabled={!gpsAvailable} onClick={() => { setGpsError(''); setMode('gps') }}>
-              Share GPS
+            <button className="btn primary" disabled={!gpsAvailable} onClick={() => choose('gps')}>
+              Share live location
             </button>
-            <button className="btn ghost" onClick={() => setMode('demo')}>Simulate route (demo)</button>
+            <button className="btn ghost" onClick={() => choose('demo')}>Simulate route (demo)</button>
           </>
         ) : (
-          <button className="btn danger" onClick={() => setMode('off')}>Stop sharing</button>
+          <button className="btn danger" onClick={() => choose('off')}>Stop sharing</button>
         )}
       </div>
+      {mode === 'gps' && <p className="tiny muted">Keep this screen open while driving. Phones pause location for websites in the background.</p>}
       {!gpsAvailable && (
-        <p className="tiny muted">Phone GPS needs HTTPS or localhost. Use “Simulate route” for the demo.</p>
+        <p className="tiny muted">Phone GPS needs the app on HTTPS (or localhost). Use “Simulate route” for the demo.</p>
       )}
+      {note && <p className="tiny warn-text">{note}</p>}
       {gpsError && <p className="tiny bad-text">GPS error: {gpsError}</p>}
     </section>
   )

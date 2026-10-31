@@ -15,3 +15,6 @@ firmware/.pio/
 firmware/include/secrets.h
 firmware/test/host/*.exe
 firmware/test/host/out.txt
+
+# Generated account lists with plaintext passwords: never commit (public repo)
+*credentials*.csv

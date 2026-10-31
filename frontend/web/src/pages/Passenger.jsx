@@ -3,6 +3,7 @@ import { api, logout } from '../api'
 import { supabase } from '../supabase'
 import { useLiveBuses } from '../live'
 import BusMap from '../components/BusMap'
+import LocationAge from '../components/LocationAge'
 import Announcements from '../components/Announcements'
 import FallbackModal from '../components/FallbackModal'
 import { notify } from '../prefs'
@@ -161,9 +162,15 @@ export default function Passenger() {
             )}
 
             {stopEta && (
-              <div className={`stop-eta ${stopEta.basis === 'live' ? 'live' : ''}`}>
+              <div className={`stop-eta ${stopEta.basis === 'live' || stopEta.basis === 'on_road' ? 'live' : ''}`}>
                 <div className="eyebrow">At your stop ({profile?.stop})</div>
-                {stopEta.passed ? <div className="muted">Bus has passed your stop</div> : stopEta.basis === 'waiting' ? (
+                {stopEta.passed ? <div className="muted">Bus has passed your stop</div> : stopEta.basis === 'on_road' ? (
+                  <div>
+                    <b>On the road</b>
+                    <span className="muted"> · {(stopEta.distance_m / 1000).toFixed(1)} km from your stop (straight line)</span>
+                    <div className="tiny muted">Watch it move on the live map below.</div>
+                  </div>
+                ) : stopEta.basis === 'waiting' ? (
                   <div>
                     <b>Still at campus</b>
                     <span className="muted"> · {stopEta.overdue_min} min past its time</span>
@@ -216,6 +223,7 @@ export default function Passenger() {
         <section className="card" id="live-map">
           <div className="eyebrow">Live map</div>
           <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={profile?.route_id} focusId={bus?.id} />
+          <LocationAge bus={bus ? buses[bus.id] ?? bus : null} />
         </section>
 
         <section className="card">

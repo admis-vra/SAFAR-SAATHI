@@ -225,3 +225,9 @@ textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px
 
 .offline-banner { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 2000;
   background: #1e293b; color: #fff; padding: 8px 14px; border-radius: 999px; font-size: 0.85rem; box-shadow: 0 4px 14px rgb(0 0 0 / 0.25); }
+
+/* ---------- live location ---------- */
+.warn-text { color: var(--warn); font-weight: 600; }
+.gps-card.on { border: 1.5px solid var(--good); }
+.loc-age { display: inline-flex; align-items: center; gap: 6px; }
+.loc-age.stale { color: var(--warn); font-weight: 600; }

@@ -110,7 +110,7 @@ export default function Settings({ session }) {
             <li>Buses send <b>counts only</b>. No camera video or photos ever leave the bus.</li>
             {role === 'passenger' && <li>Your current location is used only when you tap “use my location”, and is never stored.</li>}
             {role === 'passenger' && <li>Your home location is optional, rounded to about 100 m, and you can delete it any time.</li>}
-            {(role === 'driver' || role === 'conductor') && <li>The bus’s GPS is tracked during trips, not your personal phone.</li>}
+            {(role === 'driver' || role === 'conductor') && <li>If you turn on “Share live location”, your phone’s position is shown to students as the bus’s position, only while sharing is on. Stop sharing any time from the driver screen.</li>}
           </ul>
         </section>
 
