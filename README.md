@@ -72,6 +72,11 @@ Each bus (ESP32, or the simulator) publishes the blueprint payload every 2 s:
 
 Device ids are `B-<bus id>` (column `buses.mqtt_device_id`). The payload's `bus_id` must match the topic.
 
+**Real hardware:** `firmware/` is the ESP32 PlatformIO project (FreeRTOS tasks `Task_GPS`, `Task_IR_Counter`,
+`Task_MQTT_Publish`; NEO-6M, two IR beams, SIM800L, SOS button, 15-minute offline buffer). Its core logic is unit-tested
+on a PC (`firmware/test/host`), and the backend's own validator accepts its JSON. **It hasn't been compiled or
+flashed yet.** Wiring, power warnings and the bench checklist are in `firmware/BENCH_TEST.md`.
+
 ```bash
 # terminal 1: dev broker (localhost only; allows anonymous clients, never use it for a pilot)
 backend/.venv/Scripts/python tools/broker.py
@@ -114,8 +119,7 @@ Trips start and end from the bus's own GPS, so the driver doesn't need to tap an
   with its location. It stays open until a **dispatcher** acknowledges it, even if the button is released. A late
   SOS is still raised and marked "reported late": a delayed alarm is still an alarm.
 - **Dispatcher accounts:** set `app_metadata` `{"role": "dispatcher", "name": "Control Room"}` with the same SQL
-  used for drivers, without `bus_id`. The `/office` page for them is M7. Until then a dispatcher logging into the
-  website lands on the student page, which won't work, so use `/docs` for now.
+  used for drivers, without `bus_id`. They log in on the **Driver / Conductor** tab and land on `/office`.
 - **Known gap:** trips are detected when they **start at campus** (afternoon departures, which the last-bus
   feature needs). Morning trips that start at stop A aren't auto-detected yet.
 
@@ -138,7 +142,8 @@ Instead of rushing the bus door, students join a queue for their assigned bus an
 
 ### Last-bus fallback
 
-When a route's **last bus** (latest scheduled departure) leaves campus live, every app gets
+When the **last bus for a stop** leaves campus live (the latest departure on that route serving that stop; a route
+can split its stops across buses, e.g. Bus 9 for A–C and Buses 14/15 for D–G), every app gets
 `{type: "last_bus_left", route_id, bus_id}`. Students on that route who aren't aboard call `GET /me/fallback`.
 
 - **Geography in PostGIS:** `find_fallback_route(student, current_location)` (blueprint §2.2) starts from where
@@ -169,8 +174,9 @@ set `SAFAR_API=http://<backend-IP>:8000` before `npm run dev`. Allow Node throug
 
 | Login tab | Who | Page |
 |---|---|---|
-| Passenger | Students sign up with email + password; profile (name, student ID, route, stop, exam shift) is saved in their Supabase account | Your bus, departure, seats free, alerts, exam-day trip, live map, change stop |
-| Driver / Conductor | Staff accounts created by an admin in Supabase (see below) | **Driver:** start boarding, start trip, share GPS (or "Simulate route" for the demo). **Conductor:** open boarding, mark full, manual head count, booked passenger list |
+| Passenger | Students sign up with email + password; profile (name, student ID, route, stop, exam shift) is saved in their Supabase account | Your bus, departure, seats free, alerts, **JOIN QUEUE** card (position, "likely seat", "your turn" 5-min countdown), **last-bus fallback popup** (optional "use my location", never stored), exam-day trip, live map, change stop |
+| Driver / Conductor | Staff accounts created by an admin in Supabase (see below) | **Zero-touch trip view** (at campus / at stop / on the road, set by GPS), **Open boarding** (starts calling the queue), **hold-2-seconds SOS**, queue panel with Boarded / No-show, manual override (start trip / full / reset). Driver: GPS share or "Simulate route". Conductor: manual head count. Booked passenger list |
+| Dispatcher | `app_metadata.role = dispatcher` (see Zero-touch section) | **`/office` control room:** pulsing SOS banners with Acknowledge, incident feed, live fleet map with all routes (buses glide between GPS fixes), a tile per bus (seats + source, fusion mode, device online, trip state), queue manager columns for the clicked bus, exam-shift planner chart |
 
 Phone GPS needs HTTPS or localhost. Over `http://<IP>:5173` the browser blocks it, so use **Simulate route** in the demo.
 
@@ -277,21 +283,79 @@ is not measured** yet; the tests use synthetic sequences.
 
 ## Demo script (what judges should see)
 
-Use two phones (or two browsers): one logged in as a student, one as the Bus 14 driver account you created in Supabase.
+**Devices:** a laptop showing `/office` (log in as a dispatcher) on the projector, phone 1 logged in as a student,
+phone 2 as the Bus 14 conductor. All on the same Wi-Fi as the laptop (`http://<laptop-IP>:5173`).
 
-1. Student registers: Route 3, stop E → the page shows **Bus 14, Gate 2, departure time, seats free**.
-2. Run `count.py` with people in front of the webcam → seats free drops live on the student's phone.
-3. Bus 14 hits full → the student's phone shows **"Bus 14 is full right now, take Bus 15"**.
-4. Driver taps **Start trip** + **Simulate route** → the bus moves on the student's map, and the student is moved to the next bus.
-5. Dashboard: 11 AM shift → **Route 3 has 140 students, add a 10:00 trip with 4 buses**.
+**Before judges arrive (10 min):**
+
+```bash
+backend/.venv/Scripts/python tools/broker.py                      # terminal 1
+cd backend && .venv/Scripts/uvicorn main:app --host 0.0.0.0 --port 8000   # terminal 2
+cd frontend/web && npm run dev                                     # terminal 3
+```
+
+Queues open 30 min before the scheduled departure, so move the demo buses close to the demo slot in the Supabase
+SQL editor (example for a demo at 11:00), then restart the backend:
+
+```sql
+update buses set departure_time = '11:15' where id = 14;
+update buses set departure_time = '11:20' where id = 15;
+```
+
+**The story (≈5 min):**
+
+1. **Control room** (laptop): fleet map with all routes, the bus tiles, and the exam-shift planner ("Route 3 has
+   140 students for 11:00, add a 10:00 trip with 4 buses").
+2. **Student** (phone 1) signs up: Route 3, stop E. The page shows **Bus 14, Gate 2, ETA, seats**. Tap
+   **Join queue**: "#1 in line, likely seat".
+3. **Bus arrives** (simulated): `tools/simulate_bus.py --bus 14 --speedup 3 --loop` plus the camera,
+   `vision/count.py --bus 14 --source 0` (or `tools/fake_camera.py --bus 14 --people 28 --seats-free 12`).
+   The office tile shows **Fusion CV** while the bus stands at campus. Point out that the camera is trusted at rest
+   and the IR counter on the move.
+4. **Conductor** (phone 2) taps **Open boarding**: phone 1 flips to **"Your turn! Board Bus 14 now 4:59"**.
+   The conductor taps **Boarded**.
+5. **Zero-touch departure:** the simulated bus leaves campus and the trip starts by itself. Status `departed`, the
+   map marker glides along the route, and stops G, F, E… light up on the conductor's trip card. Nobody pressed
+   anything.
+6. **SOS:** the conductor holds **SOS for 2 s**. The control room shows a pulsing red banner with the bus location.
+   Acknowledge it.
+7. **Last bus:** run the simulator for Bus 15 (the last bus for stops D–G). A second student at stop F who didn't
+   board gets the **"Your last bus has left"** popup. "Use my current location" lists the nearest buses on other
+   routes that still have seats, or honestly says there are none.
+8. **Network drop:** `simulate_bus.py --bus 14 --drop-network 40`. The office shows the device offline, then the
+   backlog replays and the trip history fills in, **without** sending any late alerts.
+
+Say "simulated bus" and "simulated camera" (if `fake_camera.py` is used) out loud.
 
 ## Honesty notes for the pitch
 
-- ETA model is trained on **synthetic** data until real trip logs exist (`ml/artifacts/meta.json` says which). Say so if asked.
-- Seat-count accuracy (target ≥90% vs. manual count): measure it on your own clip, count 20 frames by hand, and report the real number.
-- Accounts, profiles and the latest bus state are stored in Supabase Postgres and survive restarts.
-- Without hardware, buses are driven by `tools/simulate_bus.py`. Say "simulated bus" in the demo. The ESP32
-  firmware (M8) publishes the same payload but hasn't been built or tested on hardware yet.
-- Login needs internet, since Supabase is a cloud service. Test the venue Wi-Fi early, and keep a phone hotspot as backup.
-- `/count` has no device key yet, so anyone on the network could post counts. It needs one before a real pilot.
-- Map positions (campus, route line), the campus geofence and all stop coordinates in the database are approximate **sample** coordinates, not surveyed. Geofencing is only as accurate as these, so survey them before a test ride.
+**Real and tested** (61+ backend tests against Supabase, plus browser checks of every page):
+accounts and roles (Supabase), PostGIS database, MQTT ingest with dedupe and backlog, geofenced zero-touch trips,
+SOS with acknowledgement, IR + camera fusion logic, digital queue (fair under 50 concurrent joins),
+last-bus fallback, and the student / conductor / control-room pages.
+
+**Simulated or not yet measured. Say so if asked:**
+
+- **Buses:** driven by `tools/simulate_bus.py` (same payload as the hardware). The ESP32 firmware (`firmware/`)
+  has PC-tested core logic but **has not been compiled or run on a device**; see `firmware/BENCH_TEST.md`.
+- **Accuracy:** IR count accuracy, camera seat accuracy and fusion accuracy are **not measured**. Measure them
+  on real footage and rides (count by hand, at least 3 stops) and quote only those numbers.
+- **ETA model:** trained on **synthetic** data (`ml/artifacts/meta.json` says so).
+- **Exam-shift demand** in the planner includes sample data.
+- **Coordinates:** campus, stops and route lines are **sample** coordinates, not surveyed
+  (`docs/STOPS_TODO.md`). Geofencing and fallback distances are only as good as these.
+- **Fallback usefulness:** with today's timetable (all buses within 13:10–13:20), "no other bus" is the
+  common answer. Staggered departures would make it genuinely useful.
+
+**Before any real pilot:**
+
+- Replace sample coordinates with surveyed ones, and run test rides to tune geofence radii.
+- MQTT over the internet with per-device passwords and an ACL (`tools/mosquitto/`), TLS or a private APN/VPN.
+  Consider 4G modules instead of the 2G-only SIM800L.
+- A device key on `POST /buses/{id}/count` (camera), and rate limiting on logins.
+- **Bulk-imported student accounts must get random one-time passwords** that are changed at first login. Never use
+  passwords derived from names or student IDs, which are public.
+- A DPDP-compliant privacy notice and consent: what's stored (profile, optional coarse home), what's not (video,
+  current location), retention, and how to delete.
+- Monitoring and alerting for the backend, broker and device-offline incidents. Back up the database.
+- Login needs internet (Supabase is a cloud service): test the venue network early and keep a hotspot as backup.
