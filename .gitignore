@@ -10,3 +10,8 @@ vision/*.mp4
 .env.*
 !.env.example
 .pytest_cache/
+backend/import_data/
+firmware/.pio/
+firmware/include/secrets.h
+firmware/test/host/*.exe
+firmware/test/host/out.txt
