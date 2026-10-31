@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { api, clearSession } from '../api'
+import { api, logout } from '../api'
+import { supabase } from '../supabase'
 import { useLiveBuses } from '../live'
 import BusMap from '../components/BusMap'
 import { Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
+
+const EXAM_SLOTS = ['09:00', '11:00', '14:00']
 
 function minutesUntil(hhmm) {
   const [h, m] = hhmm.split(':').map(Number)
@@ -12,9 +14,16 @@ function minutesUntil(hhmm) {
   return Math.round((t - Date.now()) / 60000)
 }
 
+async function saveProfile(profile) {
+  const result = await api('/me/profile', { method: 'PUT', body: profile })
+  // Keep a copy in Supabase so the profile survives backend restarts.
+  await supabase.auth.updateUser({ data: profile })
+  return result
+}
+
 export default function Passenger() {
-  const navigate = useNavigate()
   const [profile, setProfile] = useState(null)
+  const [needsProfile, setNeedsProfile] = useState(false)
   const [mine, setMine] = useState(null)
   const [routes, setRoutes] = useState([])
   const [examTrip, setExamTrip] = useState(null)
@@ -22,30 +31,36 @@ export default function Passenger() {
   const [error, setError] = useState('')
   const refreshTimer = useRef(null)
 
-  const handleAuthError = useCallback((err) => {
-    if (err.status === 401) {
-      clearSession()
-      navigate('/', { replace: true })
-    } else {
-      setError(err.message)
-    }
-  }, [navigate])
+  const handleError = useCallback((err) => {
+    if (err.status === 401) logout()
+    else if (err.status === 409) setNeedsProfile(true)
+    else setError(err.message)
+  }, [])
 
   const loadBus = useCallback(() => {
-    api('/me/bus').then((d) => { setMine(d); setError('') }).catch(handleAuthError)
-  }, [handleAuthError])
+    api('/me/bus').then((d) => { setMine(d); setError('') }).catch(handleError)
+  }, [handleError])
 
   const { buses, connected } = useLiveBuses(() => {
+    if (needsProfile) return
     clearTimeout(refreshTimer.current)
     refreshTimer.current = setTimeout(loadBus, 300)
   })
 
   useEffect(() => {
-    api('/me').then((d) => setProfile(d.profile)).catch(handleAuthError)
     api('/routes').then(setRoutes).catch(() => {})
-    loadBus()
+    api('/me')
+      .then((d) => {
+        if (d.profile) {
+          setProfile(d.profile)
+          loadBus()
+        } else {
+          setNeedsProfile(true)
+        }
+      })
+      .catch(handleError)
     return () => clearTimeout(refreshTimer.current)
-  }, [loadBus, handleAuthError])
+  }, [loadBus, handleError])
 
   useEffect(() => {
     if (!profile?.exam_slot) return
@@ -54,9 +69,31 @@ export default function Passenger() {
       .catch(() => {})
   }, [profile])
 
+  const onSaved = (result, saved) => {
+    setMine(result)
+    setProfile(saved)
+    setNeedsProfile(false)
+    setEditing(false)
+  }
+
   const bus = mine?.bus
   const route = routes.find((r) => r.id === profile?.route_id)
   const mins = bus ? minutesUntil(bus.eta.predicted) : null
+
+  if (needsProfile) {
+    return (
+      <div className="app">
+        <TopBar title="Welcome" connected={connected} />
+        <main className="content">
+          <section className="card">
+            <h2>Finish your profile</h2>
+            <p className="muted">Tell us your stop so we can assign your bus.</p>
+            <ProfileForm routes={routes} onSaved={onSaved} onError={handleError} />
+          </section>
+        </main>
+      </div>
+    )
+  }
 
   return (
     <div className="app">
@@ -125,9 +162,11 @@ export default function Passenger() {
               <button className="btn ghost small" onClick={() => setEditing(true)}>Change</button>
             </div>
           ) : (
-            <ChangeStop profile={profile} routes={routes} onCancel={() => setEditing(false)}
-              onSaved={(result, updated) => { setMine(result); setProfile(updated); setEditing(false) }}
-              onError={handleAuthError} />
+            <>
+              <div className="eyebrow">Change my stop</div>
+              <ProfileForm profile={profile} routes={routes} onSaved={onSaved} onError={handleError}
+                onCancel={() => setEditing(false)} stopOnly />
+            </>
           )}
         </section>
       </main>
@@ -135,20 +174,30 @@ export default function Passenger() {
   )
 }
 
-function ChangeStop({ profile, routes, onCancel, onSaved, onError }) {
+function ProfileForm({ profile, routes, onSaved, onError, onCancel, stopOnly = false }) {
   const [form, setForm] = useState({
-    route_id: String(profile.route_id), stop: profile.stop, exam_slot: profile.exam_slot ?? '',
+    name: profile?.name ?? '',
+    student_id: profile?.student_id ?? '',
+    route_id: profile ? String(profile.route_id) : '',
+    stop: profile?.stop ?? '',
+    exam_slot: profile?.exam_slot ?? '',
   })
   const [busy, setBusy] = useState(false)
   const stops = routes.find((r) => r.id === Number(form.route_id))?.stops ?? []
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value, ...(k === 'route_id' ? { stop: '' } : {}) }))
 
   const save = async (e) => {
     e.preventDefault()
     setBusy(true)
-    const body = { route_id: Number(form.route_id), stop: form.stop, exam_slot: form.exam_slot || null }
+    const body = {
+      name: form.name.trim(),
+      student_id: form.student_id.trim(),
+      route_id: Number(form.route_id),
+      stop: form.stop,
+      exam_slot: form.exam_slot || null,
+    }
     try {
-      const result = await api('/me/stop', { method: 'PUT', body })
-      onSaved(result, { ...profile, ...body })
+      onSaved(await saveProfile(body), body)
     } catch (err) {
       onError(err)
     } finally {
@@ -158,17 +207,29 @@ function ChangeStop({ profile, routes, onCancel, onSaved, onError }) {
 
   return (
     <form className="form" onSubmit={save}>
-      <div className="eyebrow">Change my stop</div>
+      {!stopOnly && (
+        <div className="row">
+          <label>
+            Full name
+            <input value={form.name} onChange={set('name')} required autoComplete="name" />
+          </label>
+          <label>
+            Student ID
+            <input value={form.student_id} onChange={set('student_id')} required minLength={3} />
+          </label>
+        </div>
+      )}
       <div className="row">
         <label>
           Route
-          <select value={form.route_id} onChange={(e) => setForm({ ...form, route_id: e.target.value, stop: '' })}>
+          <select value={form.route_id} onChange={set('route_id')} required>
+            <option value="">Choose…</option>
             {routes.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
           </select>
         </label>
         <label>
           Stop
-          <select value={form.stop} onChange={(e) => setForm({ ...form, stop: e.target.value })} required>
+          <select value={form.stop} onChange={set('stop')} required disabled={!stops.length}>
             <option value="">Choose…</option>
             {stops.map((s) => <option key={s} value={s}>Stop {s}</option>)}
           </select>
@@ -176,13 +237,13 @@ function ChangeStop({ profile, routes, onCancel, onSaved, onError }) {
       </div>
       <label>
         Exam shift
-        <select value={form.exam_slot} onChange={(e) => setForm({ ...form, exam_slot: e.target.value })}>
+        <select value={form.exam_slot} onChange={set('exam_slot')}>
           <option value="">No exam</option>
-          {['09:00', '11:00', '14:00'].map((s) => <option key={s} value={s}>{s}</option>)}
+          {EXAM_SLOTS.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </label>
       <div className="row-end">
-        <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>
+        {onCancel && <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>}
         <button className="btn primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
       </div>
     </form>

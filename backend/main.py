@@ -4,13 +4,10 @@ import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from typing import Literal
-
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
-import auth
 from auth import current_user
 from eta import predict_delay_minutes
 
@@ -27,9 +24,6 @@ buses = {
     for b in SEED["buses"]
 }
 students: dict[str, dict] = {}
-staff = {s["id"]: {k: v for k, v in s.items() if k != "password"} for s in SEED["demo_staff"]}
-for s in SEED["demo_staff"]:
-    auth.set_password("staff", s["id"], s["password"])
 
 
 def _demo_exam_demand() -> list[dict]:
@@ -51,16 +45,9 @@ class StopIn(BaseModel):
     exam_slot: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
 
 
-class RegisterIn(StopIn):
-    id: str = Field(min_length=3, max_length=32)
+class ProfileIn(StopIn):
+    student_id: str = Field(min_length=3, max_length=32)
     name: str = Field(min_length=1, max_length=60)
-    password: str = Field(min_length=6, max_length=128)
-
-
-class LoginIn(BaseModel):
-    kind: Literal["passenger", "staff"]
-    id: str
-    password: str
 
 
 class CountIn(BaseModel):
@@ -198,9 +185,24 @@ async def assign(student: dict) -> dict:
     return result
 
 
-def require_passenger(user: dict = Depends(current_user)) -> dict:
+async def save_profile(user_id: str, profile: ProfileIn) -> dict:
+    validate_stop(profile.route_id, profile.stop)
+    student = students.setdefault(user_id, {"id": user_id})
+    student.update(profile.model_dump())
+    return await assign(student)
+
+
+async def require_passenger(user: dict = Depends(current_user)) -> dict:
     if user["role"] != "passenger":
         raise HTTPException(403, "Passengers only.")
+    if user["id"] not in students:
+        # Signup stores the profile in Supabase user_metadata, so it survives backend restarts.
+        try:
+            profile = ProfileIn.model_validate(user["user_metadata"])
+            validate_stop(profile.route_id, profile.stop)
+        except (ValidationError, HTTPException):
+            raise HTTPException(409, "profile_required")
+        await save_profile(user["id"], profile)
     return students[user["id"]]
 
 
@@ -212,42 +214,18 @@ def require_bus_staff(bus_id: int, user: dict = Depends(current_user)) -> dict:
     return user
 
 
-@app.post("/auth/register")
-async def register(body: RegisterIn):
-    validate_stop(body.route_id, body.stop)
-    if body.id in students:
-        raise HTTPException(409, "This student ID is already registered. Log in instead.")
-    student = {"id": body.id, "name": body.name, "route_id": body.route_id, "stop": body.stop,
-               "exam_slot": body.exam_slot}
-    students[body.id] = student
-    auth.set_password("passenger", body.id, body.password)
-    result = await assign(student)
-    user = {"role": "passenger", "id": body.id, "name": body.name}
-    return {"token": auth.new_session(user), "user": user, **result}
-
-
-@app.post("/auth/login")
-def login(body: LoginIn):
-    if not auth.check_login(body.kind, body.id, body.password):
-        raise HTTPException(401, "Wrong ID or password.")
-    if body.kind == "passenger":
-        user = {"role": "passenger", "id": body.id, "name": students[body.id]["name"]}
-    else:
-        user = dict(staff[body.id])
-    return {"token": auth.new_session(user), "user": user}
-
-
-@app.post("/auth/logout")
-def logout(authorization: str | None = Header(default=None)):
-    auth.end_session(authorization)
-    return {"ok": True}
-
-
 @app.get("/me")
-def me(user: dict = Depends(current_user)):
+async def me(user: dict = Depends(current_user)):
+    public = {k: user[k] for k in ("id", "email", "role", "name", "bus_id")}
     if user["role"] == "passenger":
-        return {**user, "profile": students[user["id"]]}
-    return {**user, "bus": bus_view(buses[user["bus_id"]])}
+        try:
+            profile = await require_passenger(user)
+        except HTTPException:
+            profile = None
+        return {**public, "profile": profile}
+    if user["bus_id"] not in buses:
+        raise HTTPException(403, "Your staff account has no valid bus. Ask the transport office.")
+    return {**public, "bus": bus_view(buses[user["bus_id"]])}
 
 
 @app.get("/me/bus")
@@ -255,11 +233,11 @@ def my_bus(student: dict = Depends(require_passenger)):
     return allocate_view(student)
 
 
-@app.put("/me/stop")
-async def change_stop(body: StopIn, student: dict = Depends(require_passenger)):
-    validate_stop(body.route_id, body.stop)
-    student.update(body.model_dump())
-    return await assign(student)
+@app.put("/me/profile")
+async def update_profile(body: ProfileIn, user: dict = Depends(current_user)):
+    if user["role"] != "passenger":
+        raise HTTPException(403, "Passengers only.")
+    return await save_profile(user["id"], body)
 
 
 def allocate_view(student: dict) -> dict:
@@ -314,7 +292,7 @@ async def report_status(bus_id: int, body: StatusIn, _: dict = Depends(require_b
 @app.get("/buses/{bus_id}/passengers")
 def bus_passengers(bus_id: int, _: dict = Depends(require_bus_staff)):
     stops = buses[bus_id]["stops"]
-    riders = [{"id": s["id"], "name": s["name"], "stop": s["stop"]} for s in students.values()
+    riders = [{"id": s["student_id"], "name": s["name"], "stop": s["stop"]} for s in students.values()
               if s.get("bus_id") == bus_id]
     return sorted(riders, key=lambda r: (stops.index(r["stop"]), r["name"]))
 

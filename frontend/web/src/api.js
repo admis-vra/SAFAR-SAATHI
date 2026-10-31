@@ -1,23 +1,7 @@
-const KEY = 'safarsaathi.session'
+import { roleOf, supabase } from './supabase'
 
-export function getSession() {
-  try {
-    return JSON.parse(localStorage.getItem(KEY))
-  } catch {
-    return null
-  }
-}
-
-export function saveSession(token, user) {
-  localStorage.setItem(KEY, JSON.stringify({ token, user }))
-}
-
-export function homeFor(user) {
-  return user.role === 'passenger' ? '/passenger' : '/staff'
-}
-
-export function clearSession() {
-  localStorage.removeItem(KEY)
+export function homeFor(session) {
+  return roleOf(session) === 'passenger' ? '/passenger' : '/staff'
 }
 
 export class ApiError extends Error {
@@ -36,20 +20,19 @@ function errorMessage(detail) {
 
 export async function api(path, { method = 'GET', body } = {}) {
   const headers = { 'Content-Type': 'application/json' }
-  const session = getSession()
-  if (session?.token) headers.Authorization = `Bearer ${session.token}`
+  const { data } = await supabase.auth.getSession()
+  if (data.session) headers.Authorization = `Bearer ${data.session.access_token}`
   let res
   try {
     res = await fetch(`/api${path}`, { method, headers, body: body && JSON.stringify(body) })
   } catch {
     throw new ApiError(0, 'Cannot reach the server. Check your connection.')
   }
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new ApiError(res.status, errorMessage(data.detail))
-  return data
+  const json = await res.json().catch(() => ({}))
+  if (!res.ok) throw new ApiError(res.status, errorMessage(json.detail))
+  return json
 }
 
 export async function logout() {
-  await api('/auth/logout', { method: 'POST' }).catch(() => {})
-  clearSession()
+  await supabase.auth.signOut()
 }

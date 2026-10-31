@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { api, homeFor, saveSession } from '../api'
+import { api } from '../api'
+import { supabase } from '../supabase'
 
 const EXAM_SLOTS = ['09:00', '11:00', '14:00']
+const EMPTY = { email: '', password: '', name: '', student_id: '', route_id: '', stop: '', exam_slot: '' }
 
 export default function Login() {
-  const navigate = useNavigate()
   const [tab, setTab] = useState('passenger')
   const [mode, setMode] = useState('login')
   const [routes, setRoutes] = useState([])
-  const [form, setForm] = useState({ id: '', name: '', password: '', route_id: '', stop: '', exam_slot: '' })
+  const [form, setForm] = useState(EMPTY)
   const [error, setError] = useState('')
+  const [info, setInfo] = useState('')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -24,28 +25,38 @@ export default function Login() {
   const submit = async (e) => {
     e.preventDefault()
     setError('')
+    setInfo('')
     setBusy(true)
     try {
-      const data = registering
-        ? await api('/auth/register', {
-            method: 'POST',
-            body: {
-              id: form.id.trim(),
+      if (registering) {
+        const { data, error: err } = await supabase.auth.signUp({
+          email: form.email.trim(),
+          password: form.password,
+          options: {
+            data: {
               name: form.name.trim(),
-              password: form.password,
+              student_id: form.student_id.trim(),
               route_id: Number(form.route_id),
               stop: form.stop,
               exam_slot: form.exam_slot || null,
             },
-          })
-        : await api('/auth/login', {
-            method: 'POST',
-            body: { kind: tab, id: form.id.trim(), password: form.password },
-          })
-      saveSession(data.token, data.user)
-      navigate(homeFor(data.user), { replace: true })
+          },
+        })
+        if (err) throw err
+        if (!data.session) {
+          setInfo('Account created. Check your email to confirm it, then log in.')
+          setMode('login')
+          setForm((f) => ({ ...EMPTY, email: f.email }))
+        }
+      } else {
+        const { error: err } = await supabase.auth.signInWithPassword({
+          email: form.email.trim(),
+          password: form.password,
+        })
+        if (err) throw err
+      }
     } catch (err) {
-      setError(err.message)
+      setError(/fetch/i.test(err.message) ? 'Cannot reach the login server. Check your internet connection.' : err.message)
     } finally {
       setBusy(false)
     }
@@ -55,7 +66,8 @@ export default function Login() {
     setTab(t)
     setMode('login')
     setError('')
-    setForm((f) => ({ ...f, id: '', password: '' }))
+    setInfo('')
+    setForm(EMPTY)
   }
 
   return (
@@ -81,17 +93,10 @@ export default function Login() {
           <h2>{tab === 'staff' ? 'Staff login' : registering ? 'Create your account' : 'Student login'}</h2>
 
           <label>
-            {tab === 'staff' ? 'Staff ID' : 'Student ID'}
-            <input value={form.id} onChange={set('id')} required autoComplete="username"
-              placeholder={tab === 'staff' ? 'e.g. D14' : 'Your university roll / ID'} />
+            Email
+            <input type="email" value={form.email} onChange={set('email')} required autoComplete="email"
+              placeholder={tab === 'staff' ? 'Email given by the transport office' : 'Your college email'} />
           </label>
-
-          {registering && (
-            <label>
-              Full name
-              <input value={form.name} onChange={set('name')} required autoComplete="name" />
-            </label>
-          )}
 
           <label>
             Password
@@ -102,6 +107,16 @@ export default function Login() {
 
           {registering && (
             <>
+              <div className="row">
+                <label>
+                  Full name
+                  <input value={form.name} onChange={set('name')} required autoComplete="name" />
+                </label>
+                <label>
+                  Student ID
+                  <input value={form.student_id} onChange={set('student_id')} required minLength={3} />
+                </label>
+              </div>
               <div className="row">
                 <label>
                   Route
@@ -129,6 +144,7 @@ export default function Login() {
           )}
 
           {error && <div className="alert bad" role="alert">{error}</div>}
+          {info && <div className="alert good" role="status">{info}</div>}
 
           <button className="btn primary block" disabled={busy}>
             {busy ? 'Please wait…' : registering ? 'Create account' : 'Log in'}
@@ -137,7 +153,8 @@ export default function Login() {
           {tab === 'passenger' && (
             <p className="center muted small-text">
               {registering ? 'Already registered? ' : 'New here? '}
-              <button type="button" className="link" onClick={() => { setMode(registering ? 'login' : 'register'); setError('') }}>
+              <button type="button" className="link"
+                onClick={() => { setMode(registering ? 'login' : 'register'); setError(''); setInfo('') }}>
                 {registering ? 'Log in' : 'Create an account'}
               </button>
             </p>

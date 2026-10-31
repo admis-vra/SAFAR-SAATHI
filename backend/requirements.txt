@@ -1,5 +1,7 @@
 fastapi==0.115.*
 uvicorn[standard]==0.32.*
 joblib
+PyJWT[crypto]
+python-dotenv
 xgboost
 scikit-learn

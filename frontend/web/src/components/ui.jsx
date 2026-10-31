@@ -1,8 +1,6 @@
-import { useNavigate } from 'react-router-dom'
 import { logout } from '../api'
 
 export function TopBar({ title, subtitle, connected }) {
-  const navigate = useNavigate()
   return (
     <header className="topbar">
       <div>
@@ -16,15 +14,7 @@ export function TopBar({ title, subtitle, connected }) {
         <span className={`live-dot ${connected ? 'on' : ''}`} title={connected ? 'Live' : 'Reconnecting…'}>
           {connected ? 'Live' : 'Offline'}
         </span>
-        <button
-          className="btn ghost small"
-          onClick={async () => {
-            await logout()
-            navigate('/', { replace: true })
-          }}
-        >
-          Log out
-        </button>
+        <button className="btn ghost small" onClick={logout}>Log out</button>
       </div>
     </header>
   )

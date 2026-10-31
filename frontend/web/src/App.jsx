@@ -1,30 +1,60 @@
+import { useEffect, useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
-import { getSession, homeFor } from './api'
+import { homeFor } from './api'
+import { roleOf, supabase, supabaseConfigured } from './supabase'
 import Login from './pages/Login'
 import Passenger from './pages/Passenger'
 import Staff from './pages/Staff'
 
-function Guard({ roles, children }) {
-  const session = getSession()
-  if (!session) return <Navigate to="/" replace />
-  if (!roles.includes(session.user.role)) return <Navigate to={homeFor(session.user)} replace />
-  return children
+function useSupabaseSession() {
+  const [state, setState] = useState({ loading: true, session: null })
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setState({ loading: false, session: data.session }))
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => setState({ loading: false, session }))
+    return () => data.subscription.unsubscribe()
+  }, [])
+  return state
 }
 
-function Home() {
-  const session = getSession()
-  return session ? <Navigate to={homeFor(session.user)} replace /> : <Login />
+function Routed() {
+  const { loading, session } = useSupabaseSession()
+  if (loading) return <main className="content"><div className="card skeleton">Loading…</div></main>
+
+  const guard = (roles, page) => {
+    if (!session) return <Navigate to="/" replace />
+    if (!roles.includes(roleOf(session))) return <Navigate to={homeFor(session)} replace />
+    return page
+  }
+
+  return (
+    <Routes>
+      <Route path="/" element={session ? <Navigate to={homeFor(session)} replace /> : <Login />} />
+      <Route path="/passenger" element={guard(['passenger'], <Passenger />)} />
+      <Route path="/staff" element={guard(['driver', 'conductor'], <Staff />)} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  )
+}
+
+function NotConfigured() {
+  return (
+    <main className="content">
+      <section className="card">
+        <h2>Supabase is not configured</h2>
+        <p>
+          Copy <code>frontend/web/.env.example</code> to <code>frontend/web/.env.local</code>, fill in your
+          Supabase Project URL and anon key, then restart <code>npm run dev</code>.
+        </p>
+      </section>
+    </main>
+  )
 }
 
 export default function App() {
+  if (!supabaseConfigured) return <NotConfigured />
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/passenger" element={<Guard roles={['passenger']}><Passenger /></Guard>} />
-        <Route path="/staff" element={<Guard roles={['driver', 'conductor']}><Staff /></Guard>} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <Routed />
     </BrowserRouter>
   )
 }

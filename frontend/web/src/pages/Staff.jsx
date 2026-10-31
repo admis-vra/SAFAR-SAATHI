@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { api, clearSession } from '../api'
+import { api, logout } from '../api'
 import { useLiveBuses } from '../live'
 import BusMap from '../components/BusMap'
 import { DEMO_PATH } from '../geo'
@@ -10,7 +9,6 @@ const GPS_SEND_MS = 5000
 const SIM_STEP_MS = 3000
 
 export default function Staff() {
-  const navigate = useNavigate()
   const [me, setMe] = useState(null)
   const [riders, setRiders] = useState([])
   const [error, setError] = useState('')
@@ -18,13 +16,9 @@ export default function Staff() {
   const reloadTimer = useRef(null)
 
   const fail = useCallback((err) => {
-    if (err.status === 401) {
-      clearSession()
-      navigate('/', { replace: true })
-    } else {
-      setError(err.message)
-    }
-  }, [navigate])
+    if (err.status === 401) logout()
+    else setError(err.message)
+  }, [])
 
   const busId = me?.bus_id
   const loadRiders = useCallback(() => {
