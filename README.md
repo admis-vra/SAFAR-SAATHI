@@ -201,6 +201,13 @@ access token Supabase gives the browser.
    student can't make themselves a driver by editing their own profile. Staff must log out and back in after a
    role change.
 4. Restart `npm run dev` and the backend after editing the env files.
+5. **Bulk-create passenger accounts** from a roster (name + student ID) instead of self-registration: put
+   `SUPABASE_SERVICE_ROLE_KEY` in `backend/.env` (never commit it or put it in the frontend), export the roster as
+   `name,student_id` CSV, then run `python bulk_import_passengers.py your_roster.csv` from `backend/`. Each
+   student's login ID is their student ID and their password is their full name with spaces removed, lowercased
+   (e.g. "Siddhant Singh Rawat" -> `siddhantsinghrawat`); the script prints a `passenger_credentials.csv` to hand
+   out. The login page builds the matching (synthetic) email straight from the student ID, so no backend lookup
+   is needed.
 
 ## API contract
 

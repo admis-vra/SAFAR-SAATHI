@@ -3,6 +3,10 @@ import { api } from '../api'
 import { supabase } from '../supabase'
 
 const EXAM_SLOTS = ['09:00', '11:00', '14:00']
+// Matches bulk_import_passengers.py: a bulk-imported student's email is deterministic from their student ID.
+const PASSENGER_EMAIL_DOMAIN = 'passenger.safarsaathi.local'
+// Matches bulk_create_drivers.py: a bulk-created driver's email is deterministic from their login ID (driver1, ...).
+const STAFF_EMAIL_DOMAIN = 'staff.safarsaathi.local'
 const EMPTY = { email: '', password: '', name: '', student_id: '', route_id: '', stop: '', exam_slot: '' }
 
 export default function Login() {
@@ -52,11 +56,17 @@ export default function Login() {
           setMode('login')
           setForm((f) => ({ ...EMPTY, email: f.email }))
         }
+      } else if (tab === 'passenger') {
+        // Bulk-imported students log in with their student ID; self-registered ones use their real email.
+        const id = form.email.trim()
+        const email = id.includes('@') ? id : `${id}@${PASSENGER_EMAIL_DOMAIN}`
+        const { error: err } = await supabase.auth.signInWithPassword({ email, password: form.password })
+        if (err) throw err
       } else {
-        const { error: err } = await supabase.auth.signInWithPassword({
-          email: form.email.trim(),
-          password: form.password,
-        })
+        // Bulk-created staff log in with driverN/conductorN; staff set up by hand use their real email.
+        const id = form.email.trim()
+        const email = id.includes('@') ? id : `${id}@${STAFF_EMAIL_DOMAIN}`
+        const { error: err } = await supabase.auth.signInWithPassword({ email, password: form.password })
         if (err) throw err
       }
     } catch (err) {
@@ -118,9 +128,11 @@ export default function Login() {
           <h2>{tab === 'staff' ? 'Staff login' : registering ? 'Create your account' : 'Student login'}</h2>
 
           <label>
-            Email
-            <input type="email" value={form.email} onChange={set('email')} required autoComplete="email"
-              placeholder={tab === 'staff' ? 'Email given by the transport office' : 'Your college email'} />
+            {tab === 'passenger' && !registering ? 'Student ID' : tab === 'staff' ? 'Login ID' : 'Email'}
+            <input type={tab === 'staff' || (tab === 'passenger' && !registering) ? 'text' : 'email'} value={form.email}
+              onChange={set('email')} required autoComplete={tab === 'staff' || (tab === 'passenger' && !registering) ? 'username' : 'email'}
+              placeholder={tab === 'passenger' && !registering ? 'Your student ID, or your email if you registered yourself' :
+                tab === 'staff' ? 'Your login ID (e.g. driver1), or your email' : 'Your college email'} />
           </label>
 
           <label>
