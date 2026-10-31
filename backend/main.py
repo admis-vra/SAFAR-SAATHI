@@ -16,6 +16,7 @@ import db
 import fusion
 import ingest
 import queueing
+import stop_eta
 from auth import current_user
 from eta import predict_delay_minutes
 from geofence import BusFence, Zone
@@ -35,6 +36,7 @@ stop_ids: dict[tuple[int, str], int] = {}
 buses: dict[int, dict] = {}
 students: dict[str, dict] = {}
 exam_demand: list[dict] = []
+depot: dict = {}
 
 
 def _demo_exam_demand() -> list[dict]:
@@ -57,7 +59,7 @@ async def load_state():
         buses[bus_id]["offline_incident"] = incident_id
     for bus_id, incident_id in (await db.open_sos_incidents()).items():
         buses[bus_id]["sos_incident"] = incident_id
-    depot = await db.load_depot()
+    depot.clear(); depot.update(await db.load_depot())
     for bus in buses.values():
         bus["fence"] = build_fence(bus, depot)
         bus["fence_ts"] = bus.get("last_device_ts")
@@ -559,8 +561,30 @@ async def me(user: dict = Depends(current_user)):
 
 
 @app.get("/me/bus")
-def my_bus(student: dict = Depends(require_passenger)):
-    return allocate_view(student)
+async def my_bus(student: dict = Depends(require_passenger)):
+    token = await db.student_token(student["id"], queueing.service_day(queueing.now_ist()))
+    aboard = token is not None and token["status"] == "boarded" and token["bus_id"] in buses
+    if aboard:
+        # On board: keep showing this bus (don't reassign them to "the next bus") with arrival at their stop.
+        result = {"bus": bus_view(buses[token["bus_id"]]), "alert": None, "aboard": True}
+    else:
+        result = {**allocate_view(student), "aboard": False}
+    if result["bus"]:
+        result["my_stop_eta"] = my_stop_eta(buses[result["bus"]["id"]], student["stop"])
+    return result
+
+
+def my_stop_eta(bus: dict, stop: str) -> dict | None:
+    points = routes[bus["route_id"]]["stop_points"]
+    path = stop_eta.route_path((depot["lat"], depot["lng"]), points)
+    names = [p["name"] for p in reversed(points)]
+    if stop not in names:
+        return None
+    now = queueing.now_ist()
+    sched = datetime.combine(now.date(), datetime.strptime(eta(bus)["predicted"], "%H:%M").time(), tzinfo=queueing.IST)
+    loc = bus["location"]
+    return stop_eta.stop_eta(path, 1 + names.index(stop), (loc["lat"], loc["lng"]) if loc else None,
+                             bus.get("speed_kmh"), bus["status"] == "departed", sched, now)
 
 
 @app.put("/me/profile")
@@ -812,6 +836,159 @@ async def clear_my_home(student: dict = Depends(require_passenger)):
     await db.set_home(student["id"], None, None)
     student["has_home"] = False
     return {"home": None}
+
+
+# ---------- announcements (control room -> riders) ----------
+
+class AnnouncementIn(BaseModel):
+    kind: str = Field(pattern="^(delay|cancellation|info)$")
+    message: str = Field(min_length=3, max_length=280)
+    route_id: int | None = None
+    bus_id: int | None = None
+    minutes: int = Field(default=60, ge=5, le=720)
+
+
+@app.get("/announcements")
+async def announcements(route_id: int | None = None):
+    return await db.active_announcements(route_id)
+
+
+@app.post("/announcements")
+async def announce(body: AnnouncementIn, user: dict = Depends(require_dispatcher)):
+    if body.route_id is not None and body.route_id not in routes:
+        raise HTTPException(400, "Unknown route.")
+    if body.bus_id is not None and body.bus_id not in buses:
+        raise HTTPException(400, "Unknown bus.")
+    ann = await db.create_announcement(body.route_id, body.bus_id, body.kind, body.message.strip(), user["id"],
+                                       body.minutes)
+    await hub.broadcast({"type": "announcement", "data": ann})
+    return ann
+
+
+@app.delete("/announcements/{ann_id}")
+async def end_announcement(ann_id: int, _: dict = Depends(require_dispatcher)):
+    if not await db.expire_announcement(ann_id):
+        raise HTTPException(404, "No active announcement with that id.")
+    await hub.broadcast({"type": "announcement", "ended": ann_id})
+    return {"ended": ann_id}
+
+
+# ---------- crowd forecast, ride history ----------
+
+@app.get("/buses/{bus_id}/forecast")
+async def forecast(bus_id: int):
+    bus = buses.get(bus_id) or _404()
+    f = await db.bus_forecast(bus_id)
+    enough = f["trips"] >= 3
+    out = {**f, "enough_data": enough, "label": None}
+    if enough:
+        share = f["avg_people"] / bus["capacity"]
+        out["typical_seats_free"] = max(round(bus["capacity"] - f["avg_people"]), 0)
+        out["label"] = ("Usually full when it leaves" if f["full_share"] >= 0.5 else
+                        "Usually fills up" if share >= 0.85 else
+                        "Usually has seats" if share < 0.6 else "Usually busy")
+    return out
+
+
+@app.get("/me/rides")
+async def my_rides(student: dict = Depends(require_passenger)):
+    return await db.rides_for(student["id"])
+
+
+# ---------- analytics (transport office) ----------
+
+@app.get("/analytics")
+async def analytics(days: int = 7, _: dict = Depends(require_dispatcher)):
+    if not 1 <= days <= 90:
+        raise HTTPException(400, "days must be 1-90")
+    return await db.analytics(days)
+
+
+# ---------- issue reports ----------
+
+class IssueIn(BaseModel):
+    category: str = Field(pattern="^(overcrowding|driving|cleanliness|breakdown|safety|staff|other)$")
+    description: str = Field(min_length=5, max_length=1000)
+    bus_id: int | None = None
+
+
+class IssueUpdate(BaseModel):
+    status: str = Field(pattern="^(open|in_progress|resolved)$")
+    note: str | None = Field(default=None, max_length=500)
+
+
+@app.post("/issues")
+async def report_issue(body: IssueIn, user: dict = Depends(current_user)):
+    bus_id = body.bus_id
+    if bus_id is None:
+        bus_id = user.get("bus_id") or students.get(user["id"], {}).get("bus_id")
+    if bus_id is not None and bus_id not in buses:
+        raise HTTPException(400, "Unknown bus.")
+    issue = await db.create_issue(user["id"], user["role"], bus_id, body.category, body.description.strip())
+    await hub.broadcast({"type": "issue", "id": issue["id"]})
+    return issue
+
+
+@app.get("/me/issues")
+async def my_issues(user: dict = Depends(current_user)):
+    return await db.issues_for(user["id"])
+
+
+@app.get("/issues")
+async def list_issues(status: str | None = None, _: dict = Depends(require_dispatcher)):
+    return await db.all_issues(status)
+
+
+@app.patch("/issues/{issue_id}")
+async def set_issue_status(issue_id: int, body: IssueUpdate, _: dict = Depends(require_dispatcher)):
+    row = await db.update_issue(issue_id, body.status, body.note)
+    if row is None:
+        raise HTTPException(404, "No such issue.")
+    await hub.broadcast({"type": "issue", "id": issue_id})
+    return row
+
+
+# ---------- admin: timetable and stops (no SQL needed) ----------
+
+class BusEdit(BaseModel):
+    departure: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    gate: str = Field(min_length=1, max_length=30)
+    capacity: int = Field(ge=10, le=80)
+    stops: list[str] = Field(min_length=1)
+
+
+class StopEdit(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    geofence_m: int = Field(ge=20, le=300)
+
+
+@app.put("/admin/buses/{bus_id}")
+async def edit_bus(bus_id: int, body: BusEdit, _: dict = Depends(require_dispatcher)):
+    bus = buses.get(bus_id) or _404()
+    route_stops = routes[bus["route_id"]]["stops"]
+    if any(s not in route_stops for s in body.stops):
+        raise HTTPException(400, f"Stops must be from this route: {', '.join(route_stops)}.")
+    ordered = [s for s in route_stops if s in body.stops]
+    await db.update_bus(bus_id, body.departure, body.gate.strip(), body.capacity, ordered)
+    bus.update(departure=body.departure, gate=body.gate.strip(), capacity=body.capacity, stops=ordered)
+    await hub.broadcast({"type": "bus", "data": bus_view(bus)})
+    return bus_view(bus)
+
+
+@app.put("/admin/stops/{stop_id}")
+async def edit_stop(stop_id: int, body: StopEdit, _: dict = Depends(require_dispatcher)):
+    route = next((r for r in routes.values() if any(p["id"] == stop_id for p in r["stop_points"])), None)
+    if route is None:
+        raise HTTPException(404, "Stop not found.")
+    await db.update_stop(stop_id, body.lat, body.lng, body.geofence_m)
+    point = next(p for p in route["stop_points"] if p["id"] == stop_id)
+    point.update(lat=body.lat, lng=body.lng, geofence_m=body.geofence_m)
+    for bus in buses.values():
+        if bus["route_id"] == route["id"]:
+            bus["fence"] = build_fence(bus, depot)  # geofences follow the corrected stop position
+    await hub.broadcast({"type": "routes"})
+    return point
 
 
 @app.get("/buses/{bus_id}/passengers")

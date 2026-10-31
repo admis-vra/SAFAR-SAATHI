@@ -368,3 +368,152 @@ async def fallback_candidates(exclude_route: int, lat: float, lng: float) -> lis
 async def set_home(student_id: str, lat: float | None, lng: float | None):
     await pool.execute("update profiles set home_location = $2::text::geography, updated_at = now() "
                        "where id = $1::uuid", student_id, _point(lat, lng))
+
+
+def _iso(d: dict, *keys) -> dict:
+    for k in keys:
+        if d.get(k) is not None:
+            d[k] = d[k].isoformat()
+    return d
+
+
+# ---------- announcements ----------
+
+async def create_announcement(route_id, bus_id, kind, message, created_by, minutes) -> dict:
+    r = await pool.fetchrow("""
+        insert into announcements (route_id, bus_id, kind, message, created_by, expires_at)
+        values ($1, $2, $3::announcement_kind, $4, $5::uuid, now() + make_interval(mins => $6))
+        returning id, route_id, bus_id, kind::text as kind, message, created_at, expires_at""",
+        route_id, bus_id, kind, message, created_by, minutes)
+    return _iso(dict(r), "created_at", "expires_at")
+
+
+async def active_announcements(route_id: int | None = None) -> list[dict]:
+    rows = await pool.fetch("""
+        select id, route_id, bus_id, kind::text as kind, message, created_at, expires_at from announcements
+        where expires_at > now() and ($1::int is null or route_id is null or route_id = $1)
+        order by created_at desc limit 20""", route_id)
+    return [_iso(dict(r), "created_at", "expires_at") for r in rows]
+
+
+async def expire_announcement(ann_id: int) -> bool:
+    return await pool.fetchval("update announcements set expires_at = now() where id = $1 and expires_at > now() "
+                               "returning id", ann_id) is not None
+
+
+# ---------- issues ----------
+
+_ISSUE_COLS = ("id, reporter_role, bus_id, category::text as category, description, status::text as status, "
+               "office_note, created_at, updated_at")
+
+
+async def create_issue(reporter_id, role, bus_id, category, description) -> dict:
+    r = await pool.fetchrow(f"""
+        insert into issues (reporter_id, reporter_role, bus_id, category, description)
+        values ($1::uuid, $2, $3, $4::issue_category, $5) returning {_ISSUE_COLS}""",
+        reporter_id, role, bus_id, category, description)
+    return _iso(dict(r), "created_at", "updated_at")
+
+
+async def issues_for(reporter_id: str) -> list[dict]:
+    rows = await pool.fetch(f"select {_ISSUE_COLS} from issues where reporter_id = $1::uuid "
+                            "order by created_at desc limit 50", reporter_id)
+    return [_iso(dict(r), "created_at", "updated_at") for r in rows]
+
+
+async def all_issues(status: str | None) -> list[dict]:
+    rows = await pool.fetch(f"select {_ISSUE_COLS} from issues where $1::text is null or status::text = $1 "
+                            "order by created_at desc limit 200", status)
+    return [_iso(dict(r), "created_at", "updated_at") for r in rows]
+
+
+async def update_issue(issue_id: int, status: str, note: str | None) -> dict | None:
+    r = await pool.fetchrow("""
+        update issues set status = $2::issue_status, office_note = coalesce($3, office_note), updated_at = now()
+        where id = $1 returning id, status::text as status, office_note""", issue_id, status, note)
+    return dict(r) if r else None
+
+
+# ---------- forecast, rides, analytics ----------
+
+# People on board when a trip left campus: the last reading from 3 min before to 1 min after the trip start.
+_LOAD_AT_DEPARTURE = """(select tl.people_count from telemetry tl
+    where tl.bus_id = t.bus_id and tl.people_count is not null
+      and tl.ts between t.start_time - interval '3 minutes' and t.start_time + interval '1 minute'
+    order by tl.ts desc limit 1)"""
+
+
+async def bus_forecast(bus_id: int, days: int = 28) -> dict:
+    r = await pool.fetchrow(f"""
+        select count(*) as trips, avg(x.load) as avg_people,
+               avg(case when x.load >= x.cap then 1.0 else 0.0 end) as full_share
+        from (select {_LOAD_AT_DEPARTURE} as load, b.max_capacity as cap
+              from active_trips t join buses b on b.id = t.bus_id
+              where t.bus_id = $1 and t.start_time > now() - make_interval(days => $2)) x
+        where x.load is not null""", bus_id, days)
+    num = lambda v: float(v) if v is not None else None
+    return {"trips": r["trips"], "avg_people": num(r["avg_people"]), "full_share": num(r["full_share"])}
+
+
+async def rides_for(student_id: str) -> list[dict]:
+    rows = await pool.fetch("""
+        select t.service_date, t.bus_id, r.name as route, t.queue_position as position, t.closed_at as boarded_at
+        from digital_tokens t join buses b on b.id = t.bus_id join routes r on r.id = b.route_id
+        where t.student_id = $1::uuid and t.status = 'boarded' order by t.closed_at desc limit 60""", student_id)
+    return [_iso(dict(r), "service_date", "boarded_at") for r in rows]
+
+
+async def analytics(days: int) -> dict:
+    routes = await pool.fetch(f"""
+        with trips as (
+          -- Punctuality only for each bus's first trip of the day: later runs (shuttles, simulator loops)
+          -- have no timetable slot of their own and would read as hours late.
+          select t.route_id, b.max_capacity as cap, {_LOAD_AT_DEPARTURE} as load,
+                 case when row_number() over (partition by t.bus_id, (t.start_time at time zone 'Asia/Kolkata')::date
+                                              order by t.start_time) = 1
+                      then extract(epoch from ((t.start_time at time zone 'Asia/Kolkata')::time - t.departure_scheduled))
+                           / 60 end as late_min
+          from active_trips t join buses b on b.id = t.bus_id
+          where t.start_time > now() - make_interval(days => $1))
+        select r.id as route_id, r.name, count(t.route_id) as trips,
+               avg(case when t.late_min <= 5 then 1.0 when t.late_min is not null then 0.0 end) as on_time_share,
+               avg(t.late_min) as avg_late_min,
+               avg(t.load::float / t.cap) as avg_load_share,
+               count(*) filter (where t.load is not null and t.load < 0.3 * t.cap) as near_empty_trips,
+               count(*) filter (where t.load is not null) as trips_with_load
+        from routes r left join trips t on t.route_id = r.id
+        group by r.id, r.name order by r.id""", days)
+    queue = await pool.fetchrow("""
+        select count(*) as joined, count(*) filter (where status = 'boarded') as boarded,
+               count(*) filter (where status = 'no_show') as no_show,
+               count(*) filter (where status = 'expired') as expired
+        from digital_tokens where created_at > now() - make_interval(days => $1)""", days)
+    incidents = await pool.fetchrow("""
+        select count(*) filter (where kind = 'sos') as sos, count(*) filter (where kind = 'device_offline') as offline
+        from incidents where opened_at > now() - make_interval(days => $1)""", days)
+    open_issues = await pool.fetchval("select count(*) from issues where status <> 'resolved'")
+    num = lambda v: round(float(v), 3) if v is not None else None
+    return {
+        "days": days,
+        "routes": [{"route_id": r["route_id"], "name": r["name"], "trips": r["trips"],
+                    "on_time_share": num(r["on_time_share"]), "avg_late_min": num(r["avg_late_min"]),
+                    "avg_load_share": num(r["avg_load_share"]), "near_empty_trips": r["near_empty_trips"],
+                    "trips_with_load": r["trips_with_load"]} for r in routes],
+        "queue": dict(queue), "incidents": dict(incidents), "open_issues": open_issues,
+    }
+
+
+# ---------- admin edits ----------
+
+async def update_bus(bus_id: int, departure: str, gate: str, capacity: int, serves: list[str]) -> bool:
+    return await pool.fetchval("""
+        update buses set departure_time = $2::time, gate = $3, max_capacity = $4, serves_stops = $5
+        where id = $1 returning id""", bus_id, datetime.strptime(departure, "%H:%M").time(), gate, capacity,
+        serves) is not None
+
+
+async def update_stop(stop_id: int, lat: float, lng: float, radius: int) -> bool:
+    return await pool.fetchval("""
+        update stops set location = st_setsrid(st_makepoint($3::float8, $2::float8), 4326)::geography,
+                         geofence_radius_meters = $4
+        where id = $1 returning id""", stop_id, lat, lng, radius) is not None

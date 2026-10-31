@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { homeFor } from './api'
 import { roleOf, supabase, supabaseConfigured } from './supabase'
+import OfflineBanner from './components/OfflineBanner'
+import Admin from './pages/Admin'
+import Analytics from './pages/Analytics'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Office from './pages/Office'
@@ -38,6 +41,8 @@ function Routed() {
       <Route path="/passenger" element={guard(['passenger'], <Passenger />)} />
       <Route path="/staff" element={guard(['driver', 'conductor'], <Staff />)} />
       <Route path="/office" element={guard(['dispatcher'], <Office />)} />
+      <Route path="/office/analytics" element={guard(['dispatcher'], <Analytics />)} />
+      <Route path="/office/admin" element={guard(['dispatcher'], <Admin />)} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
@@ -62,6 +67,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routed />
+      <OfflineBanner />
     </BrowserRouter>
   )
 }

@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api, logout } from '../api'
 import { useLiveBuses, useRoutes } from '../live'
 import BusMap from '../components/BusMap'
+import Icon from '../components/Icon'
+import { AnnouncementPanel, IssuesPanel } from '../components/OfficePanels'
 import { SeatMeter, StatusPill, TopBar } from '../components/ui'
 
 const SLOTS = ['09:00', '11:00', '14:00']
@@ -14,6 +17,8 @@ export default function Office() {
   const [incidents, setIncidents] = useState([])
   const [selected, setSelected] = useState(null)
   const [queueTick, setQueueTick] = useState(0)
+  const [annTick, setAnnTick] = useState(0)
+  const [issueTick, setIssueTick] = useState(0)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
 
@@ -29,6 +34,8 @@ export default function Office() {
   const { buses, connected } = useLiveBuses((msg) => {
     if (msg.type === 'incident') loadIncidents()
     if (msg.type === 'queue' || msg.type === 'token_called') setQueueTick((t) => t + 1)
+    if (msg.type === 'announcement') setAnnTick((t) => t + 1)
+    if (msg.type === 'issue') setIssueTick((t) => t + 1)
     if (msg.type === 'last_bus_left') {
       const route = routes.find((r) => r.id === msg.route_id)
       setNotice(`Last bus of ${route?.name ?? `route ${msg.route_id}`} (Bus ${msg.bus_id}) has left. ` +
@@ -56,6 +63,10 @@ export default function Office() {
       <TopBar title="Control room" subtitle={`${list.length} buses`} connected={connected} home="/office" />
       <main className="content wide">
         {error && <div className="alert bad" role="alert">{error}</div>}
+        <nav className="office-links">
+          <Link to="/office/analytics" className="btn ghost small"><Icon name="chart" size={16} /> Analytics</Link>
+          <Link to="/office/admin" className="btn ghost small"><Icon name="settings" size={16} /> Buses &amp; stops</Link>
+        </nav>
         {sos.map((i) => (
           <div key={i.id} className="alert sos-banner" role="alert">
             <div>
@@ -109,6 +120,11 @@ export default function Office() {
         </section>
 
         {selectedBus && <QueueBoard bus={selectedBus} tick={queueTick} onError={fail} />}
+
+        <div className="office-grid even">
+          <AnnouncementPanel routes={routes} tick={annTick} onError={fail} />
+          <IssuesPanel tick={issueTick} onError={fail} />
+        </div>
 
         <Planner routes={routes} onError={fail} />
       </main>

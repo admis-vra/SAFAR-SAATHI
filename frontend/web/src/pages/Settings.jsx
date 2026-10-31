@@ -3,6 +3,8 @@ import { api, homeFor, logout } from '../api'
 import { roleOf, supabase } from '../supabase'
 import { useRoutes } from '../live'
 import Icon from '../components/Icon'
+import IssueReport from '../components/IssueReport'
+import MyRides from '../components/MyRides'
 import { BottomNav, Toggle, TopBar } from '../components/ui'
 import { ProfileForm } from './Passenger'
 import { enableNotifications, notificationsSupported, setPref, usePrefs } from '../prefs'
@@ -95,6 +97,10 @@ export default function Settings({ session }) {
           <Toggle checked={prefs.sounds} onChange={(v) => setPref('sounds', v)}
             label="Alert sound" hint="A short beep with each alert" />
         </section>
+
+        {role === 'passenger' && me?.profile && <MyRides onError={fail} />}
+
+        {role !== 'dispatcher' && <IssueReport onError={fail} onDone={() => flash('Report sent to the transport office')} />}
 
         <ChangePassword onDone={() => flash('Password changed')} onError={fail} />
 

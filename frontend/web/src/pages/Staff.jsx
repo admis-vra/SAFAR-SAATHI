@@ -5,6 +5,8 @@ import BusMap from '../components/BusMap'
 import { DEMO_PATH } from '../geo'
 import { BottomNav, Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
 import { notify, usePrefs } from '../prefs'
+import Announcements from '../components/Announcements'
+import { enqueue, flush, pending } from '../outbox'
 
 const GPS_SEND_MS = 5000
 const SIM_STEP_MS = 3000
@@ -16,6 +18,7 @@ export default function Staff() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [queueTick, setQueueTick] = useState(0)
+  const [annTick, setAnnTick] = useState(0)
   const reloadTimer = useRef(null)
   const routes = useRoutes()
 
@@ -31,6 +34,7 @@ export default function Staff() {
 
   const { buses, connected } = useLiveBuses((msg) => {
     if (msg.type === 'alert' && msg.bus_id === busId) setNotice(msg.message)
+    if (msg.type === 'announcement') setAnnTick((n) => n + 1)
     if (msg.type === 'incident' && msg.kind === 'sos' && msg.bus_id === busId && msg.open === false) {
       notify('SOS acknowledged', 'The control room has seen your SOS and will call you.')
     }
@@ -68,6 +72,7 @@ export default function Staff() {
 
       <main className="content">
         {error && <div className="alert bad" role="alert">{error}</div>}
+        <Announcements routeId={bus.route_id} tick={annTick} />
         {notice && (
           <div className="alert warn row-between" role="alert">
             <span>{notice}</span>
@@ -223,17 +228,43 @@ function SosButton({ bus, onError }) {
 function StaffQueue({ busId, tick, onError }) {
   const [data, setData] = useState(null)
   const [busy, setBusy] = useState(null)
+  const [unsynced, setUnsynced] = useState(() => pending().length)
+  const [marked, setMarked] = useState({})  // optimistic marks while offline
+
+  const reload = useCallback(() => {
+    api(`/buses/${busId}/queue`).then(setData).catch((err) => { if (err.status !== 0) onError(err) })
+  }, [busId, onError])
+
+  useEffect(reload, [reload, tick])
+
+  // Offline mode: replay saved taps when the connection is back (and every 15 s, as phones don't always say).
   useEffect(() => {
-    api(`/buses/${busId}/queue`).then(setData).catch(onError)
-  }, [busId, tick, onError])
+    const sync = async () => {
+      if (!pending().length) return
+      const left = await flush()
+      setUnsynced(left)
+      if (!left) { setMarked({}); reload() }
+    }
+    window.addEventListener('online', sync)
+    const id = setInterval(sync, 15000)
+    sync()
+    return () => { window.removeEventListener('online', sync); clearInterval(id) }
+  }, [reload])
 
   const mark = async (id, outcome) => {
+    const path = `/buses/${busId}/queue/${id}/${outcome}`
     setBusy(id)
     try {
-      await api(`/buses/${busId}/queue/${id}/${outcome}`, { method: 'POST' })
-      setData(await api(`/buses/${busId}/queue`))
+      await api(path, { method: 'POST' })
+      reload()
     } catch (err) {
-      onError(err)
+      if (err.status === 0) {  // no network: keep the tap, show it as done, sync later
+        enqueue(path)
+        setUnsynced(pending().length)
+        setMarked((m) => ({ ...m, [id]: outcome }))
+      } else {
+        onError(err)
+      }
     } finally {
       setBusy(null)
     }
@@ -247,6 +278,11 @@ function StaffQueue({ busId, tick, onError }) {
         <div className="eyebrow">Queue · <span lang="hi">कतार</span></div>
         <span className="tiny muted">{waiting.length} waiting · {boarded.length} boarded · {data.queue.state}</span>
       </div>
+      {unsynced > 0 && (
+        <div className="alert warn small-text" role="status">
+          Offline: {unsynced} tap{unsynced > 1 ? 's' : ''} saved on this phone, will sync automatically.
+        </div>
+      )}
       {called.length === 0 ? (
         <p className="muted small-text">
           {data.queue.state !== 'open' ?
@@ -256,7 +292,7 @@ function StaffQueue({ busId, tick, onError }) {
         </p>
       ) : (
         <ul className="called-list">
-          {called.map((t) => (
+          {called.filter((t) => !marked[t.id]).map((t) => (
             <li key={t.id}>
               <span><b>#{t.position}</b> {t.name} <span className="tiny muted">{t.student_id}</span></span>
               <span className="row gap-s">

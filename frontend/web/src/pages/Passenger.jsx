@@ -3,7 +3,9 @@ import { api, logout } from '../api'
 import { supabase } from '../supabase'
 import { useLiveBuses } from '../live'
 import BusMap from '../components/BusMap'
+import Announcements from '../components/Announcements'
 import FallbackModal from '../components/FallbackModal'
+import { notify } from '../prefs'
 import QueueCard from '../components/QueueCard'
 import { BottomNav, Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
 
@@ -33,7 +35,10 @@ export default function Passenger() {
   const [error, setError] = useState('')
   const [queueTick, setQueueTick] = useState(0)
   const [fallbackCheck, setFallbackCheck] = useState(0)  // >0: (re)check whether the last bus has left
+  const [annTick, setAnnTick] = useState(0)
+  const [forecast, setForecast] = useState(null)
   const refreshTimer = useRef(null)
+  const nearAlerted = useRef(null)
 
   const handleError = useCallback((err) => {
     if (err.status === 401) logout()
@@ -49,6 +54,11 @@ export default function Passenger() {
     if (needsProfile) return
     if (msg.type === 'queue' || msg.type === 'token_called') setQueueTick((t) => t + 1)
     if (msg.type === 'last_bus_left' && msg.route_id === profile?.route_id) setFallbackCheck((n) => n + 1)
+    if (msg.type === 'announcement') {
+      setAnnTick((n) => n + 1)
+      const a = msg.data
+      if (a && (a.route_id == null || a.route_id === profile?.route_id)) notify('SafarSaathi notice', a.message)
+    }
     clearTimeout(refreshTimer.current)
     refreshTimer.current = setTimeout(loadBus, 300)
   })
@@ -86,6 +96,23 @@ export default function Passenger() {
   const bus = mine?.bus
   const route = routes.find((r) => r.id === profile?.route_id)
   const mins = bus ? minutesUntil(bus.eta.predicted) : null
+  const stopEta = mine?.my_stop_eta
+  const busId = bus?.id
+
+  useEffect(() => {
+    if (!busId) return
+    api(`/buses/${busId}/forecast`).then(setForecast).catch(() => {})
+  }, [busId])
+
+  // One "5 minutes from your stop" alert per trip, only from live GPS.
+  useEffect(() => {
+    if (!stopEta || stopEta.basis !== 'live' || stopEta.passed || stopEta.minutes > 5) return
+    const key = `${busId}-${new Date().toDateString()}`
+    if (nearAlerted.current === key) return
+    nearAlerted.current = key
+    notify(`Bus ${busId} is ${stopEta.minutes || 'about 1'} min from stop ${profile?.stop}`,
+      mine?.aboard ? 'Get ready to get off.' : 'Head to your stop now.')
+  }, [stopEta, busId, mine?.aboard, profile?.stop])
 
   if (needsProfile) {
     return (
@@ -109,6 +136,7 @@ export default function Passenger() {
 
       <main className="content">
         {error && <div className="alert bad">{error}</div>}
+        <Announcements routeId={profile?.route_id} tick={annTick} />
         {mine?.alert && <div className="alert warn big-alert" role="alert">{mine.alert}</div>}
 
         {!mine && !error && <div className="card skeleton">Finding your bus…</div>}
@@ -119,7 +147,7 @@ export default function Passenger() {
           <section className="card bus-card">
             <div className="bus-card-head">
               <div>
-                <div className="eyebrow">Your bus today</div>
+                <div className="eyebrow">{mine?.aboard ? 'You are on' : 'Your bus today'}</div>
                 <div className="bus-number">Bus {bus.id}</div>
                 <div className="muted">{bus.gate} · Stops {bus.stops.join(', ')}</div>
               </div>
@@ -132,6 +160,26 @@ export default function Passenger() {
               </div>
             )}
 
+            {stopEta && (
+              <div className={`stop-eta ${stopEta.basis === 'live' ? 'live' : ''}`}>
+                <div className="eyebrow">At your stop ({profile?.stop})</div>
+                {stopEta.passed ? <div className="muted">Bus has passed your stop</div> : stopEta.basis === 'waiting' ? (
+                  <div>
+                    <b>Still at campus</b>
+                    <span className="muted"> · {stopEta.overdue_min} min past its time</span>
+                    <div className="tiny muted">You’ll get a time here once it leaves.</div>
+                  </div>
+                ) : (
+                  <div>
+                    <b className="stop-eta-time">~{stopEta.at}</b>
+                    <span className="muted"> · {stopEta.minutes === 0 ? 'arriving now' : `in ${stopEta.minutes} min`}
+                      {' · '}{(stopEta.distance_m / 1000).toFixed(1)} km</span>
+                    <div className="tiny muted">{stopEta.basis === 'live' ? 'Live from the bus GPS' : 'Estimated from the timetable'}</div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="grid-2">
               <div className="stat">
                 <div className="eyebrow">Departure</div>
@@ -140,6 +188,11 @@ export default function Passenger() {
               <div className="stat">
                 <div className="eyebrow">Seats</div>
                 <SeatMeter bus={bus} />
+                {forecast?.enough_data && (
+                  <div className="tiny forecast-hint" title={`From ${forecast.trips} past trips`}>
+                    {forecast.label} · {forecast.trips} past trips
+                  </div>
+                )}
               </div>
             </div>
           </section>
