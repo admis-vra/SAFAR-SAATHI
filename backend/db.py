@@ -27,11 +27,15 @@ async def ensure_partitions(days_ahead: int = 7):
 
 async def load_routes() -> tuple[dict, dict]:
     rows = await pool.fetch(
-        "select r.id, r.name, s.id as stop_id, s.stop_name from routes r "
+        "select r.id, r.name, s.id as stop_id, s.stop_name, st_y(s.location::geometry) as lat, "
+        "st_x(s.location::geometry) as lng, s.geofence_radius_meters as radius from routes r "
         "join stops s on s.route_id = r.id where r.is_active order by r.id, s.seq")
     routes, stop_ids = {}, {}
     for r in rows:
-        routes.setdefault(r["id"], {"id": r["id"], "name": r["name"], "stops": []})["stops"].append(r["stop_name"])
+        route = routes.setdefault(r["id"], {"id": r["id"], "name": r["name"], "stops": [], "stop_points": []})
+        route["stops"].append(r["stop_name"])
+        route["stop_points"].append({"name": r["stop_name"], "lat": r["lat"], "lng": r["lng"],
+                                     "geofence_m": r["radius"]})
         stop_ids[(r["id"], r["stop_name"])] = r["stop_id"]
     return routes, stop_ids
 
@@ -39,17 +43,21 @@ async def load_routes() -> tuple[dict, dict]:
 async def load_buses() -> list[dict]:
     rows = await pool.fetch("""
         select b.id, b.route_id, b.gate, b.serves_stops, b.max_capacity, b.departure_time,
+               b.mqtt_device_id,
                s.status, st_y(s.location::geometry) as lat, st_x(s.location::geometry) as lng,
-               s.people_count, s.cam_seats_free, s.cam_seats_total, s.updated_at,
+               s.speed_kmh, s.people_count, s.cam_seats_free, s.cam_seats_total, s.ir_net, s.last_device_ts,
+               s.updated_at,
                (select t.id from active_trips t where t.bus_id = b.id and t.end_time is null) as trip_id
         from buses b left join bus_live_state s on s.bus_id = b.id
         order by b.id""")
     return [{
         "id": r["id"], "route_id": r["route_id"], "gate": r["gate"], "stops": list(r["serves_stops"]),
         "capacity": r["max_capacity"], "departure": r["departure_time"].strftime("%H:%M"),
+        "device_id": r["mqtt_device_id"],
         "status": r["status"] or "scheduled",
         "location": {"lat": r["lat"], "lng": r["lng"]} if r["lat"] is not None else None,
-        "count": r["people_count"],
+        "speed_kmh": r["speed_kmh"],
+        "count": r["people_count"], "ir_net": r["ir_net"], "last_device_ts": r["last_device_ts"],
         "seat_cam": ({"free": r["cam_seats_free"], "total": r["cam_seats_total"]}
                      if r["cam_seats_total"] else None),
         "updated_at": r["updated_at"].isoformat(timespec="seconds") if r["updated_at"] else None,
@@ -61,17 +69,64 @@ async def save_live_state(bus: dict):
     loc = bus["location"]
     cam = bus["seat_cam"] or {}
     await pool.execute("""
-        insert into bus_live_state (bus_id, status, location, people_count, cam_seats_free, cam_seats_total, updated_at)
+        insert into bus_live_state (bus_id, status, location, speed_kmh, people_count, cam_seats_free,
+                                    cam_seats_total, ir_net, last_device_ts, updated_at)
         values ($1, $2::bus_status,
                 case when $3::float8 is null then null
                      else st_setsrid(st_makepoint($4::float8, $3::float8), 4326)::geography end,
-                $5, $6, $7, now())
+                $5, $6, $7, $8, $9, $10, now())
         on conflict (bus_id) do update set
-          status = excluded.status, location = excluded.location, people_count = excluded.people_count,
-          cam_seats_free = excluded.cam_seats_free, cam_seats_total = excluded.cam_seats_total,
-          updated_at = excluded.updated_at""",
+          status = excluded.status, location = excluded.location, speed_kmh = excluded.speed_kmh,
+          people_count = excluded.people_count, cam_seats_free = excluded.cam_seats_free,
+          cam_seats_total = excluded.cam_seats_total, ir_net = excluded.ir_net,
+          last_device_ts = excluded.last_device_ts, updated_at = excluded.updated_at""",
         bus["id"], bus["status"], loc["lat"] if loc else None, loc["lng"] if loc else None,
-        bus["count"], cam.get("free"), cam.get("total"))
+        bus.get("speed_kmh"), bus["count"], cam.get("free"), cam.get("total"), bus.get("ir_net"),
+        bus.get("last_device_ts"))
+
+
+async def insert_device_telemetry(bus_id: int, trip_id: int | None, items: list, from_backlog: bool) -> set:
+    """Insert device readings in one statement; returns the timestamps that were new (not duplicates)."""
+    rows = await pool.fetch("""
+        insert into telemetry (bus_id, ts, trip_id, location, speed_kmh, ir_net, ir_in, ir_out, sats,
+                               people_count, from_backlog)
+        select $1, t.ts, $2,
+               case when t.fix then st_setsrid(st_makepoint(t.lon, t.lat), 4326)::geography end,
+               t.speed, t.net, t.inn, t.outt, t.sats, greatest(t.net, 0), $3
+        from unnest($4::timestamptz[], $5::float8[], $6::float8[], $7::bool[], $8::real[], $9::int[],
+                    $10::int[], $11::int[], $12::smallint[]) as t(ts, lat, lon, fix, speed, net, inn, outt, sats)
+        on conflict (bus_id, ts) do nothing
+        returning ts""",
+        bus_id, trip_id, from_backlog,
+        [i.ts for i in items], [i.gps.lat for i in items], [i.gps.lon for i in items],
+        [i.has_fix for i in items], [i.gps.speed for i in items], [i.pax.net_current for i in items],
+        [i.pax.in_count for i in items], [i.pax.out_count for i in items], [i.gps.sats for i in items])
+    return {r["ts"] for r in rows}
+
+
+async def open_incident(bus_id: int, trip_id: int | None, kind: str, detail: str) -> int:
+    return await pool.fetchval(
+        "insert into incidents (bus_id, trip_id, kind, detail) values ($1, $2, $3::incident_kind, $4) returning id",
+        bus_id, trip_id, kind, detail)
+
+
+async def close_incident(incident_id: int):
+    await pool.execute("update incidents set closed_at = now() where id = $1 and closed_at is null", incident_id)
+
+
+async def open_incidents(kind: str) -> dict[int, int]:
+    rows = await pool.fetch(
+        "select bus_id, max(id) as id from incidents where kind = $1::incident_kind and closed_at is null "
+        "group by bus_id", kind)
+    return {r["bus_id"]: r["id"] for r in rows}
+
+
+async def bus_for_token_hash(token_hash: str) -> int | None:
+    return await pool.fetchval("select id from buses where device_token_hash = $1", token_hash)
+
+
+async def set_device_token_hash(bus_id: int, token_hash: str):
+    await pool.execute("update buses set device_token_hash = $2 where id = $1", bus_id, token_hash)
 
 
 async def insert_telemetry(bus: dict, ts: datetime, from_backlog: bool = False):

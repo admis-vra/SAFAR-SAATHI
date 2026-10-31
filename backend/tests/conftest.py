@@ -76,17 +76,21 @@ def migrated():
 @pytest.fixture(autouse=True)
 def restore_bus_state():
     saved = fetch("select bus_id, status::text as status, st_astext(location) as wkt, speed_kmh, people_count, "
-                  "cam_seats_free, cam_seats_total from bus_live_state")
+                  "cam_seats_free, cam_seats_total, ir_net, last_device_ts from bus_live_state")
     open_trips = [r["id"] for r in fetch("select id from active_trips where end_time is null")]
+    open_incidents = [r["id"] for r in fetch("select id from incidents where closed_at is null")]
     yield
     execute("update active_trips set end_time = now() where end_time is null and not (id = any($1::bigint[]))",
             open_trips)
+    execute("update incidents set closed_at = now() where closed_at is null and not (id = any($1::bigint[]))",
+            open_incidents)
     for r in saved:
         execute("""update bus_live_state set status=$2::bus_status,
                    location=case when $3::text is null then null else st_geogfromtext($3::text) end,
-                   speed_kmh=$4, people_count=$5, cam_seats_free=$6, cam_seats_total=$7 where bus_id=$1""",
+                   speed_kmh=$4, people_count=$5, cam_seats_free=$6, cam_seats_total=$7, ir_net=$8,
+                   last_device_ts=$9 where bus_id=$1""",
                 r["bus_id"], r["status"], r["wkt"], r["speed_kmh"], r["people_count"],
-                r["cam_seats_free"], r["cam_seats_total"])
+                r["cam_seats_free"], r["cam_seats_total"], r["ir_net"], r["last_device_ts"])
 
 
 @pytest.fixture

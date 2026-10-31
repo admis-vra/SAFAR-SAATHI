@@ -1,0 +1,9 @@
+# The backend reads every bus.
+user backend
+topic read safarsaathi/bus/+/telemetry
+topic read safarsaathi/bus/+/backlog
+
+# Every other user is a bus device whose username is its device id (e.g. B-14):
+# %u = username, so B-14 can publish only to safarsaathi/bus/B-14/...
+pattern write safarsaathi/bus/%u/telemetry
+pattern write safarsaathi/bus/%u/backlog

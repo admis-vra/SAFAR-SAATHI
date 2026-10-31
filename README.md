@@ -58,6 +58,40 @@ cd ml && py -3.13 -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 cd vision && py -3.13 -m venv .venv && .venv/Scripts/pip install -r requirements.txt && .venv/Scripts/python count.py --bus 14 --source 0 --show --interval 5
 ```
 
+### Bus devices: MQTT telemetry + simulator (no hardware needed)
+
+Each bus (ESP32, or the simulator) publishes the blueprint payload every 2 s:
+
+| Topic | Payload |
+|---|---|
+| `safarsaathi/bus/{device}/telemetry` | `{"bus_id": "B-14", "timestamp": 1761900000, "gps": {"lat", "lon", "speed", "sats"}, "pax": {"in_count", "out_count", "net_current"}, "sos_active": false}` |
+| `safarsaathi/bus/{device}/backlog` | JSON array of the same objects, sent once after a network drop |
+
+Device ids are `B-<bus id>` (column `buses.mqtt_device_id`). The payload's `bus_id` must match the topic.
+
+```bash
+# terminal 1: dev broker (localhost only; allows anonymous clients, never use it for a pilot)
+backend/.venv/Scripts/python tools/broker.py
+# terminal 2: backend with MQTT_URL=mqtt://127.0.0.1:1883 in backend/.env
+# terminal 3: a simulated bus (add --loop to keep driving, --speedup 5 to move faster)
+backend/.venv/Scripts/python tools/simulate_bus.py --bus 14
+backend/.venv/Scripts/python tools/simulate_bus.py --bus 14 --speedup 8 --drop-network 20 --sos-at D
+```
+
+What the backend does with it:
+- **Validation:** bad coordinates, times more than 5 min in the future or 24 h in the past, malformed JSON, or a
+  payload claiming another bus are all dropped.
+- **History:** every reading goes to `telemetry` with the device's own timestamp. Repeats of the same
+  `(bus, second)` are stored once, so a device re-sending after a reconnect does no harm.
+- **Live state:** only a reading **newer** than the last one moves the bus. Late and backlog data is history only.
+  No GPS fix (fewer than 4 satellites, or 0,0) keeps the last known location.
+- **Offline detection:** 30 s of silence opens a `device_offline` incident, which closes when the device is heard again.
+- **HTTP fallback** for devices that can't do MQTT: `POST /ingest/telemetry` (one reading) or `/ingest/backlog`
+  (array), with header `X-Device-Token`. Create a token with
+  `backend/.venv/Scripts/python backend/provision_device.py --bus 14`. It's shown once and only its hash is stored.
+- **For a real pilot:** use Mosquitto with a password per device and an ACL so each bus can publish only its own
+  topic. See `tools/mosquitto/`. Over GSM the broker must be reachable from the internet, unlike the laptop broker.
+
 ### Website (passenger + driver/conductor)
 
 ```bash
@@ -115,28 +149,32 @@ Base URL: `http://<host>:8000`. All JSON. 🔒 = needs `Authorization: Bearer <S
 | GET | `/me` 🔒 | everyone | the logged-in user: passenger `profile` (or `null` if not set up yet), or staff `bus` |
 | GET | `/me/bus` 🔒 | passenger | `{bus, alert}`: re-allocates if their bus left, warns if it is full. `409 profile_required` if no profile |
 | PUT | `/me/profile` 🔒 | passenger | `{student_id, name, route_id, stop, exam_slot?}` → `{bus, alert}` |
-| GET | `/routes` | everyone | list of routes with ordered stops |
+| GET | `/routes` | everyone | routes with ordered `stops` and `stop_points` (`name, lat, lng, geofence_m`) |
 | GET | `/buses` | everyone | all buses (`BusView`) |
 | GET | `/buses/{id}` | everyone | one `BusView` |
 | POST | `/buses/{id}/count` | vision, conductor | `{count, seats_free?, seats_total?}`: seat fields optional, sent together |
 | POST | `/buses/{id}/location` 🔒 | driver/conductor **of that bus** | `{lat, lng}` |
 | POST | `/buses/{id}/status` 🔒 | driver/conductor **of that bus** | `{status: scheduled\|boarding\|departed\|full}` |
 | GET | `/buses/{id}/passengers` 🔒 | driver/conductor **of that bus** | students booked on the bus, in stop order |
+| POST | `/ingest/telemetry` | bus device (`X-Device-Token`) | one blueprint payload → `{accepted, duplicates, live_updated}` |
+| POST | `/ingest/backlog` | bus device (`X-Device-Token`) | array of payloads (≤2000), stored as history |
 | GET | `/planner?slot=11:00` | dashboard | students per route for an exam slot + extra-trip suggestions (≥30 students) |
 | GET | `/dashboard/summary` | dashboard | buses, totals, half-empty and full bus ids |
-| WS | `/ws` | student app, dashboard | pushes `{type:"buses",data:[...]}`, `{type:"bus",data:BusView}`, `{type:"alert",bus_id,message}` |
+| WS | `/ws` | student app, dashboard | pushes `{type:"buses",data:[...]}`, `{type:"bus",data:BusView}`, `{type:"alert",bus_id,message}`, `{type:"incident",bus_id,kind,open}` |
 
 `BusView`:
 
 ```json
 {"id": 14, "route_id": 3, "gate": "Gate 2", "stops": ["D","E","F","G"], "capacity": 40,
  "occupancy": 28, "seats_free": 12, "seat_source": "camera", "seats_seen": 40,
- "status": "boarding", "location": {"lat": 30.27, "lng": 78.0},
+ "status": "boarding", "location": {"lat": 30.27, "lng": 78.0}, "speed_kmh": 24.5,
  "eta": {"scheduled": "13:15", "predicted": "13:18", "delay_min": 3.2, "source": "model|baseline|timetable"},
- "updated_at": "2026-10-31T13:02:11"}
+ "updated_at": "2026-10-31T13:02:11",
+ "device": {"id": "B-14", "online": true, "last_reading": "2026-10-31T07:32:10+00:00", "ir_net": 28}}
 ```
 
-Occupancy = people counted by the camera if the bus has one, otherwise students allocated to it.
+Occupancy = the latest people count from the bus (IR door counter or camera, whichever reported last; M4 adds
+proper fusion), otherwise students allocated to it.
 
 `seats_free` comes from the best source available, named in `seat_source`:
 
@@ -162,6 +200,8 @@ Use two phones (or two browsers): one logged in as a student, one as the Bus 14 
 - ETA model is trained on **synthetic** data until real trip logs exist (`ml/artifacts/meta.json` says which). Say so if asked.
 - Seat-count accuracy (target ≥90% vs. manual count): measure it on your own clip, count 20 frames by hand, and report the real number.
 - Accounts, profiles and the latest bus state are stored in Supabase Postgres and survive restarts.
+- Without hardware, buses are driven by `tools/simulate_bus.py`. Say "simulated bus" in the demo. The ESP32
+  firmware (M8) publishes the same payload but hasn't been built or tested on hardware yet.
 - Login needs internet, since Supabase is a cloud service. Test the venue Wi-Fi early, and keep a phone hotspot as backup.
 - `/count` has no device key yet, so anyone on the network could post counts. It needs one before a real pilot.
 - Map positions (campus, route line) and all stop coordinates in the database are approximate **sample** coordinates, not surveyed.

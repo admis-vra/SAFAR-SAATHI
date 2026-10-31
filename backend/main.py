@@ -1,18 +1,27 @@
+import asyncio
+import hashlib
+import logging
 import math
 import os
 import random
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 import db
+import ingest
 from auth import current_user
 from eta import predict_delay_minutes
 
+log = logging.getLogger("safarsaathi")
+
 EXTRA_TRIP_THRESHOLD = 30
+OFFLINE_AFTER_S = 30
+OFFLINE_CHECK_EVERY_S = 5
 
 routes: dict[int, dict] = {}
 stop_ids: dict[tuple[int, str], int] = {}
@@ -37,6 +46,8 @@ async def load_state():
     routes.clear(); routes.update(loaded_routes)
     stop_ids.clear(); stop_ids.update(loaded_stop_ids)
     buses.clear(); buses.update({b["id"]: b for b in await db.load_buses()})
+    for bus_id, incident_id in (await db.open_incidents("device_offline")).items():
+        buses[bus_id]["offline_incident"] = incident_id
     students.clear()
     exam_demand[:] = _demo_exam_demand()
     for p in await db.all_profiles():
@@ -55,7 +66,20 @@ async def lifespan(_app: FastAPI):
     await db.connect(dsn)
     await db.ensure_partitions()
     await load_state()
+
+    subscriber = None
+    if os.environ.get("MQTT_URL"):
+        subscriber = ingest.MqttSubscriber(os.environ["MQTT_URL"], apply_device_telemetry, asyncio.get_running_loop())
+        subscriber.start()
+    else:
+        log.warning("MQTT_URL not set: MQTT ingest disabled (HTTP /ingest still works)")
+    watcher = asyncio.create_task(watch_offline())
     yield
+    watcher.cancel()
+    with suppress(asyncio.CancelledError):
+        await watcher
+    if subscriber:
+        subscriber.stop()
     await db.close()
 
 
@@ -150,7 +174,14 @@ def bus_view(bus: dict) -> dict:
         "id": bus["id"], "route_id": bus["route_id"], "gate": bus["gate"], "stops": bus["stops"],
         "capacity": bus["capacity"], "occupancy": occupancy(bus), "seats_free": seats_free(bus),
         "seat_source": seat_source(bus), "seats_seen": bus["seat_cam"]["total"] if bus["seat_cam"] else None,
-        "status": bus["status"], "location": bus["location"], "eta": eta(bus), "updated_at": bus["updated_at"],
+        "status": bus["status"], "location": bus["location"], "speed_kmh": bus.get("speed_kmh"),
+        "eta": eta(bus), "updated_at": bus["updated_at"],
+        "device": {
+            "id": bus.get("device_id"),
+            "online": bus.get("last_seen") is not None and not bus.get("offline_incident"),
+            "last_reading": bus["last_device_ts"].isoformat() if bus.get("last_device_ts") else None,
+            "ir_net": bus.get("ir_net"),
+        },
     }
 
 
@@ -177,6 +208,82 @@ async def persist(bus: dict, telemetry: bool = True):
     await db.save_live_state(bus)
     if telemetry:
         await db.insert_telemetry(bus, now)
+
+
+async def apply_device_telemetry(device_id: str, items: list[ingest.Telemetry], from_backlog: bool) -> dict:
+    bus = next((b for b in buses.values() if b.get("device_id") == device_id), None)
+    if bus is None:
+        log.warning("telemetry from unknown device %s", device_id)
+        return {"accepted": 0, "duplicates": 0, "live_updated": False}
+    if any(i.bus_id != device_id for i in items):
+        log.warning("payload bus_id does not match device %s; dropped", device_id)
+        return {"accepted": 0, "duplicates": 0, "live_updated": False}
+
+    items = sorted(items, key=lambda i: i.timestamp)
+    new_ts = await db.insert_device_telemetry(bus["id"], bus.get("trip_id"), items, from_backlog)
+    fresh = [i for i in items if i.ts in new_ts]
+    bus["last_seen"] = time.monotonic()
+    if bus.get("offline_incident"):
+        await db.close_incident(bus.pop("offline_incident"))
+        await hub.broadcast({"type": "incident", "bus_id": bus["id"], "kind": "device_offline", "open": False})
+
+    # Only a reading newer than what we already show may move the live state (late/out-of-order data is
+    # history only). Replayed backlog never triggers alerts; that rule matters once M3 adds geofence events.
+    latest = fresh[-1] if fresh else None
+    live = latest is not None and (bus.get("last_device_ts") is None or latest.ts > bus["last_device_ts"])
+    if live:
+        bus["last_device_ts"] = latest.ts
+        if latest.has_fix:
+            bus["location"] = {"lat": latest.gps.lat, "lng": latest.gps.lon}
+        bus["speed_kmh"] = latest.gps.speed
+        bus["ir_net"] = latest.pax.net_current
+        bus["count"] = max(latest.pax.net_current, 0)
+        bus["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        await db.save_live_state(bus)
+        await hub.broadcast({"type": "bus", "data": bus_view(bus)})
+    return {"accepted": len(fresh), "duplicates": len(items) - len(fresh), "live_updated": live}
+
+
+async def check_offline(now: float):
+    for bus in buses.values():
+        seen = bus.get("last_seen")
+        if seen is None or bus.get("offline_incident") or now - seen <= OFFLINE_AFTER_S:
+            continue
+        bus["offline_incident"] = await db.open_incident(
+            bus["id"], bus.get("trip_id"), "device_offline", f"No data for over {OFFLINE_AFTER_S} s")
+        await hub.broadcast({"type": "incident", "bus_id": bus["id"], "kind": "device_offline", "open": True})
+
+
+async def watch_offline():
+    while True:
+        await asyncio.sleep(OFFLINE_CHECK_EVERY_S)
+        try:
+            await check_offline(time.monotonic())
+        except Exception:
+            log.exception("offline check failed")
+
+
+async def device_bus(x_device_token: str | None = Header(default=None)) -> dict:
+    bus_id = None
+    if x_device_token:
+        bus_id = await db.bus_for_token_hash(hashlib.sha256(x_device_token.encode()).hexdigest())
+    if bus_id is None or bus_id not in buses:
+        raise HTTPException(401, "Unknown device token.")
+    return buses[bus_id]
+
+
+@app.post("/ingest/telemetry")
+async def ingest_telemetry(body: ingest.Telemetry, bus: dict = Depends(device_bus)):
+    if body.bus_id != bus["device_id"]:
+        raise HTTPException(403, f"This token belongs to {bus['device_id']}, not {body.bus_id}.")
+    return await apply_device_telemetry(bus["device_id"], [body], from_backlog=False)
+
+
+@app.post("/ingest/backlog")
+async def ingest_backlog(body: list[ingest.Telemetry] = Body(max_length=2000), bus: dict = Depends(device_bus)):
+    if any(i.bus_id != bus["device_id"] for i in body):
+        raise HTTPException(403, f"This token belongs to {bus['device_id']}.")
+    return await apply_device_telemetry(bus["device_id"], body, from_backlog=True)
 
 
 @app.get("/routes")

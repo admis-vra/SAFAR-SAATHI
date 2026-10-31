@@ -4,5 +4,6 @@ joblib
 PyJWT[crypto]
 python-dotenv
 asyncpg
+paho-mqtt
 xgboost
 scikit-learn
