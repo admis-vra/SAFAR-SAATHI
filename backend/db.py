@@ -30,14 +30,14 @@ async def ensure_partitions(days_ahead: int = 7):
 async def load_routes() -> tuple[dict, dict]:
     rows = await pool.fetch(
         "select r.id, r.name, s.id as stop_id, s.stop_name, st_y(s.location::geometry) as lat, "
-        "st_x(s.location::geometry) as lng, s.geofence_radius_meters as radius from routes r "
-        "join stops s on s.route_id = r.id where r.is_active order by r.id, s.seq")
+        "st_x(s.location::geometry) as lng, s.geofence_radius_meters as radius, s.coords_source from routes r "
+        "join stops s on s.route_id = r.id where r.is_active and s.seq > 0 order by r.id, s.seq")
     routes, stop_ids = {}, {}
     for r in rows:
         route = routes.setdefault(r["id"], {"id": r["id"], "name": r["name"], "stops": [], "stop_points": []})
         route["stops"].append(r["stop_name"])
         route["stop_points"].append({"id": r["stop_id"], "name": r["stop_name"], "lat": r["lat"], "lng": r["lng"],
-                                     "geofence_m": r["radius"]})
+                                     "geofence_m": r["radius"], "coords_source": r["coords_source"]})
         stop_ids[(r["id"], r["stop_name"])] = r["stop_id"]
     return routes, stop_ids
 
@@ -45,17 +45,21 @@ async def load_routes() -> tuple[dict, dict]:
 async def load_buses() -> list[dict]:
     rows = await pool.fetch("""
         select b.id, b.route_id, b.gate, b.serves_stops, b.max_capacity, b.departure_time,
-               b.mqtt_device_id,
+               b.mqtt_device_id, b.registration_number, b.run1_start, b.run2_start,
                s.status, st_y(s.location::geometry) as lat, st_x(s.location::geometry) as lng,
                s.speed_kmh, s.people_count, s.cam_seats_free, s.cam_seats_total, s.ir_net, s.last_device_ts,
                s.ir_offset, s.fused_seats_free, s.updated_at,
                (select t.id from active_trips t where t.bus_id = b.id and t.end_time is null) as trip_id,
                (select max(t.start_time) from active_trips t where t.bus_id = b.id) as last_trip_start
         from buses b left join bus_live_state s on s.bus_id = b.id
+        where b.active
         order by b.id""")
+    hhmm = lambda t: t.strftime("%H:%M") if t else None
     return [{
         "id": r["id"], "route_id": r["route_id"], "gate": r["gate"], "stops": list(r["serves_stops"]),
         "capacity": r["max_capacity"], "departure": r["departure_time"].strftime("%H:%M"),
+        "default_departure": r["departure_time"].strftime("%H:%M"),
+        "registration": r["registration_number"], "runs": [t for t in (hhmm(r["run1_start"]), hhmm(r["run2_start"])) if t],
         "device_id": r["mqtt_device_id"],
         "status": r["status"] or "scheduled",
         "location": {"lat": r["lat"], "lng": r["lng"]} if r["lat"] is not None else None,
@@ -515,5 +519,56 @@ async def update_bus(bus_id: int, departure: str, gate: str, capacity: int, serv
 async def update_stop(stop_id: int, lat: float, lng: float, radius: int) -> bool:
     return await pool.fetchval("""
         update stops set location = st_setsrid(st_makepoint($3::float8, $2::float8), 4326)::geography,
-                         geofence_radius_meters = $4
+                         geofence_radius_meters = $4, coords_source = 'manual'
         where id = $1 returning id""", stop_id, lat, lng, radius) is not None
+
+
+# ---------- daily plans: staff bus picks, students' trip home, buses per departure slot ----------
+
+class BusTaken(Exception):
+    pass
+
+
+async def staff_picks(day: date) -> list[dict]:
+    rows = await pool.fetch("select user_id::text as user_id, role, name, bus_id from staff_bus_picks "
+                            "where service_date = $1", day)
+    return [dict(r) for r in rows]
+
+
+async def pick_bus(user_id: str, role: str, name: str, day: date, bus_id: int):
+    try:
+        await pool.execute("""
+            insert into staff_bus_picks (user_id, role, name, service_date, bus_id) values ($1::uuid, $2, $3, $4, $5)
+            on conflict (user_id, service_date) do update set bus_id = excluded.bus_id, role = excluded.role,
+              name = excluded.name, picked_at = now()""", user_id, role, name, day, bus_id)
+    except asyncpg.UniqueViolationError:
+        raise BusTaken()
+
+
+async def departure_intents(day: date) -> list[dict]:
+    rows = await pool.fetch("select student_id::text as student_id, to_char(slot, 'HH24:MI') as slot, stop_name as stop "
+                            "from departure_intents where service_date = $1", day)
+    return [dict(r) for r in rows]
+
+
+async def set_departure_intent(student_id: str, day: date, slot: str | None, stop: str):
+    await pool.execute("""
+        insert into departure_intents (student_id, service_date, slot, stop_name) values ($1::uuid, $2, $3::time, $4)
+        on conflict (student_id, service_date) do update set slot = excluded.slot, stop_name = excluded.stop_name,
+          updated_at = now()""", student_id, day, datetime.strptime(slot, "%H:%M").time() if slot else None, stop)
+
+
+async def slot_assignments(day: date) -> dict[int, str]:
+    rows = await pool.fetch("select bus_id, to_char(slot, 'HH24:MI') as slot from bus_slot_assignments "
+                            "where service_date = $1", day)
+    return {r["bus_id"]: r["slot"] for r in rows}
+
+
+async def assign_slot(day: date, bus_id: int, slot: str | None, by: str):
+    if slot is None:
+        await pool.execute("delete from bus_slot_assignments where service_date = $1 and bus_id = $2", day, bus_id)
+        return
+    await pool.execute("""
+        insert into bus_slot_assignments (service_date, bus_id, slot, assigned_by) values ($1, $2, $3::time, $4::uuid)
+        on conflict (service_date, bus_id) do update set slot = excluded.slot, assigned_by = excluded.assigned_by,
+          assigned_at = now()""", day, bus_id, datetime.strptime(slot, "%H:%M").time(), by)

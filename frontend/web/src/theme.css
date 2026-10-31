@@ -550,7 +550,7 @@ textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px
   }
 
   .staff-col-ops .map {
-    height: 320px !important;
+    height: 440px !important;
   }
 
   /* Settings 2-column grid */
@@ -642,3 +642,67 @@ textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px
     border: 1px solid var(--line);
   }
 }
+
+/* ---------- daily plans: stop search, morning buses, trip home, staff bus pick ---------- */
+.alert.info { background: var(--info-bg); color: #1e3a8a; }
+[data-theme="dark"] .alert.info { color: #bfdbfe; }
+
+.stop-picker { display: flex; flex-direction: column; gap: 6px; }
+.stop-options { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px;
+  max-height: 260px; overflow-y: auto; background: var(--card); }
+.stop-options li + li { border-top: 1px solid var(--line); }
+.stop-options li.tiny { padding: 10px 12px; }
+.stop-options button { width: 100%; display: flex; justify-content: space-between; gap: 10px; align-items: center;
+  padding: 10px 12px; border: none; background: none; color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.stop-options button:hover { background: var(--chip); }
+.inline-select select { padding: 2px 6px; font-size: 0.8rem; }
+
+.bus-badge { display: inline-grid; place-items: center; min-width: 40px; height: 34px; padding: 0 8px; border-radius: 10px;
+  background: var(--chip); color: var(--text); font-weight: 800; font-size: 1.05rem; flex: none; }
+.bus-badge.good { background: var(--good); color: #fff; }
+.bus-badge.info { background: var(--blue); color: #fff; }
+.bus-badge.bad { background: var(--bad-bg); color: var(--bad); text-decoration: line-through; }
+.bus-badge.warn-pill { background: var(--warn-bg); color: var(--warn); }
+
+.morning-card .alert { margin: 8px 0; }
+.morning-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.morning-row { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 12px; background: var(--chip); }
+.morning-row.passed, .morning-row.probably_passed, .morning-row.at_campus, .morning-row.done { opacity: 0.7; }
+.morning-info { flex: 1; min-width: 0; }
+
+.slot-buttons { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 10px 0; }
+.slot-btn { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 8px; border-radius: 12px;
+  border: 1.5px solid var(--line); background: var(--card); color: var(--text); cursor: pointer; font: inherit; }
+.slot-btn .slot-time { font-size: 1.15rem; font-weight: 800; }
+.slot-btn.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+.slot-btn.over:not(.active) { border-color: var(--bad); }
+.slot-btn:disabled { cursor: default; opacity: 0.65; }
+.slot-btn.active:disabled { opacity: 1; }
+
+.bus-picker .picker-search { width: 100%; margin: 10px 0; }
+.picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px; max-height: 420px; overflow-y: auto; }
+.picker-item { display: flex; gap: 10px; align-items: center; padding: 8px; border-radius: 12px; border: 1.5px solid var(--line);
+  background: var(--card); color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.picker-item.on { border-color: var(--blue); }
+.picker-item:disabled { opacity: 0.5; cursor: not-allowed; }
+.picker-text { display: flex; flex-direction: column; min-width: 0; }
+
+.demand-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 10px 0; }
+.demand-slot { border: 1.5px solid var(--line); border-radius: 12px; padding: 10px; }
+.demand-slot.short { border-color: var(--bad); }
+.demand-stops { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.demand-stops li { display: flex; justify-content: space-between; gap: 8px; font-size: 0.88rem; }
+.demand-stops li.uncovered { color: var(--bad); font-weight: 600; }
+
+/* bus numbers drawn on the map */
+.bus-num-icon { background: none; border: none; }
+.bus-num-marker { display: inline-block; transform: translate(-50%, -50%); padding: 2px 7px; border-radius: 999px;
+  background: #334155; color: #fff; font: 800 13px/1.3 system-ui, sans-serif; border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); white-space: nowrap; }
+.bus-num-marker.mark { background: #16a34a; }
+.bus-num-marker.focus { background: #2563eb; font-size: 15px; }
+.bus-num-marker.sos { background: #dc2626; }
+.bus-num-marker.off { background: #94a3b8; }
+.bus-num-marker.dim { background: #94a3b8; opacity: 0.6; font-size: 11px; }
+
+.chip.estimated:not(.on) { border-color: var(--warn); }

@@ -94,7 +94,7 @@ export default function QueueCard({ tick, onError }) {
 
       {!active && q.state === 'open' && (
         <button className="btn primary block" disabled={busy} onClick={() => act('POST')}>
-          Join queue · <span lang="hi">कतार में जुड़ें</span>
+          Join queue
         </button>
       )}
       {!active && q.state === 'not_open' && <p className="muted">The queue opens at {q.opens_at}.</p>}

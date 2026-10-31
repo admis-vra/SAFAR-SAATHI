@@ -7,6 +7,7 @@ import IssueReport from '../components/IssueReport'
 import MyRides from '../components/MyRides'
 import { BottomNav, Toggle, TopBar } from '../components/ui'
 import { ProfileForm } from './Passenger'
+import { useStops } from '../plans'
 import { enableNotifications, notificationsSupported, setPref, usePrefs } from '../prefs'
 
 const ROLE_LABEL = { passenger: 'Student', driver: 'Driver', conductor: 'Conductor', dispatcher: 'Control room' }
@@ -17,6 +18,7 @@ export default function Settings({ session }) {
   const home = homeFor(session)
   const prefs = usePrefs()
   const routes = useRoutes()
+  const stops = useStops()
   const [me, setMe] = useState(null)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState('')
@@ -50,7 +52,7 @@ export default function Settings({ session }) {
             <dt>Name</dt><dd>{me?.profile?.name ?? me?.name ?? '…'}</dd>
             <dt>Role</dt><dd>{ROLE_LABEL[role]}</dd>
             {me?.profile?.student_id && <><dt>Student ID</dt><dd>{me.profile.student_id}</dd></>}
-            {me?.bus && <><dt>Bus</dt><dd>Bus {me.bus.id} · {me.bus.gate} · stops {me.bus.stops.join(', ')}</dd></>}
+            {me?.bus && <><dt>Bus today</dt><dd>Bus {me.bus.id} · {me.bus.route_name ?? `stops ${me.bus.stops.join(', ')}`}</dd></>}
             <dt>Sign-in</dt><dd className="break">{session.user.email}</dd>
           </dl>
         </section>
@@ -59,8 +61,8 @@ export default function Settings({ session }) {
           <>
             <section className="card settings-card">
               <h3 className="settings-title"><Icon name="pin" /> My trip</h3>
-              <p className="tiny muted">Your route and stop decide which bus you’re assigned to.</p>
-              <ProfileForm profile={me.profile} routes={routes} onError={fail} stopOnly
+              <p className="tiny muted">Your stop decides which buses we show you, morning and evening.</p>
+              <ProfileForm profile={me.profile} routes={routes} stops={stops} onError={fail} stopOnly
                 onSaved={(_, p) => { setMe((m) => ({ ...m, profile: { ...m.profile, ...p } })); flash('Trip saved') }} />
             </section>
             <HomeLocation hasHome={me.profile.has_home} onError={fail}
@@ -83,10 +85,6 @@ export default function Settings({ session }) {
           </div>
           <Toggle checked={prefs.largeText} onChange={(v) => setPref('largeText', v)}
             label="Larger text" hint="Easier to read on a moving bus or in sunlight" />
-          {(role === 'driver' || role === 'conductor') && (
-            <Toggle checked={prefs.hindi} onChange={(v) => setPref('hindi', v)}
-              label="Hindi labels · हिंदी" hint="Show Hindi under the big buttons" />
-          )}
         </section>
 
         <section className="card settings-card">

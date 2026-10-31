@@ -22,7 +22,7 @@ const STEPS = [
 
 const AUDIENCES = [
   ['user', 'Students', ['Which bus and gate, when it leaves', 'Free seats before you walk out', 'Queue from your phone', 'Fallback if the last bus left']],
-  ['bus', 'Drivers & conductors', ['Trips run themselves from GPS', 'Big buttons with Hindi labels', 'Queue: call, boarded, no-show', 'Hold-to-send SOS']],
+  ['bus', 'Drivers & conductors', ['Trips run themselves from GPS', 'Large, simple controls', 'Queue: call, boarded, no-show', 'Hold-to-send SOS']],
   ['shield', 'Transport office', ['Live fleet map and seat counts', 'SOS and device-offline alerts', 'Queue manager per bus', 'Extra trips for exam shifts']],
 ]
 

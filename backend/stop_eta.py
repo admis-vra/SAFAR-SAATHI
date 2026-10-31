@@ -47,6 +47,22 @@ def stop_eta(path: list[tuple], stop_index: int, bus_pos: tuple | None, speed_km
         return {"basis": "timetable", "distance_m": round(dist), "passed": False,
                 "minutes": max(0, math.ceil((at - now).total_seconds() / 60)), "at": at.astimezone(IST).strftime("%H:%M")}
 
+    return _live(path, stop_index, bus_pos, speed_kmh, now)
+
+
+def _along(path: list[tuple], start: int, end: int) -> float:
+    return sum(distance_m(*path[i], *path[i + 1]) for i in range(start, end))
+
+
+def _arrival(dist: float, stops_between: int, speed_kmh: float | None, now: datetime) -> dict:
+    kmh = min(max(speed_kmh, MIN_KMH), MAX_KMH) if speed_kmh and speed_kmh > 3 else CRUISE_KMH
+    secs = dist / (kmh / 3.6) + DWELL_S * max(stops_between, 0)
+    at = now + timedelta(seconds=secs)
+    return {"basis": "live", "distance_m": round(dist), "passed": False,
+            "minutes": math.ceil(secs / 60), "at": at.astimezone(IST).strftime("%H:%M")}
+
+
+def _live(path: list[tuple], stop_index: int, bus_pos: tuple, speed_kmh: float | None, now: datetime) -> dict:
     # Closest route segment to the bus.
     best = min(range(len(path) - 1), key=lambda i: _project(bus_pos, path[i], path[i + 1])[1])
     t, _ = _project(bus_pos, path[best], path[best + 1])
@@ -55,9 +71,38 @@ def stop_eta(path: list[tuple], stop_index: int, bus_pos: tuple | None, speed_km
         return {"basis": "live", "distance_m": round(distance_m(*bus_pos, *path[stop_index])), "passed": not near,
                 "minutes": 0, "at": now.astimezone(IST).strftime("%H:%M")}
     seg_len = distance_m(*path[best], *path[best + 1])
-    dist = seg_len * (1 - t) + sum(distance_m(*path[i], *path[i + 1]) for i in range(best + 1, stop_index))
-    kmh = min(max(speed_kmh, MIN_KMH), MAX_KMH) if speed_kmh and speed_kmh > 3 else CRUISE_KMH
-    secs = dist / (kmh / 3.6) + DWELL_S * max(stop_index - best - 1, 0)
-    at = now + timedelta(seconds=secs)
-    return {"basis": "live", "distance_m": round(dist), "passed": False,
-            "minutes": math.ceil(secs / 60), "at": at.astimezone(IST).strftime("%H:%M")}
+    return _arrival(seg_len * (1 - t) + _along(path, best + 1, stop_index), stop_index - best - 1, speed_kmh, now)
+
+
+# ---------- morning runs: from the far end towards campus ----------
+
+def inbound_path(campus: tuple, stop_points: list[dict]) -> list[tuple]:
+    """Morning order: the first stop (far end, seq 1) through to the stop nearest campus, then campus."""
+    return [(p["lat"], p["lng"]) for p in stop_points] + [campus]
+
+
+def inbound_timetable(path: list[tuple], stop_index: int, run_start: datetime) -> datetime:
+    """When a run that leaves path[0] at run_start should reach path[stop_index]."""
+    secs = _along(path, 0, stop_index) / (CRUISE_KMH / 3.6) + DWELL_S * stop_index
+    return run_start + timedelta(seconds=secs)
+
+
+def inbound_live(path: list[tuple], stop_index: int, bus_pos: tuple, speed_kmh: float | None, now: datetime) -> dict:
+    """Live ETA on a morning run. A bus still driving to its first stop is not 'past' anything yet."""
+    to_start = distance_m(*bus_pos, *path[0])
+    best = min(range(len(path) - 1), key=lambda i: _project(bus_pos, path[i], path[i + 1])[1])
+    # Nearest to the first segment, and behind its start: still on the way to the first stop.
+    before_start = to_start > ARRIVING_M and best == 0 and _project(bus_pos, path[0], path[1])[0] == 0.0
+    if stop_index == 0:
+        if to_start <= ARRIVING_M:
+            return {"basis": "live", "distance_m": round(to_start), "passed": False, "minutes": 0,
+                    "at": now.astimezone(IST).strftime("%H:%M")}
+        if not before_start:
+            return {"basis": "live", "distance_m": round(to_start), "passed": True, "minutes": 0,
+                    "at": now.astimezone(IST).strftime("%H:%M")}
+    if before_start:
+        return _arrival(to_start + _along(path, 0, stop_index), stop_index, speed_kmh, now)
+    eta = _live(path, stop_index, bus_pos, speed_kmh, now)
+    if not eta["passed"] and distance_m(*bus_pos, *path[stop_index]) <= ARRIVING_M:
+        eta.update(minutes=0, at=now.astimezone(IST).strftime("%H:%M"))
+    return eta

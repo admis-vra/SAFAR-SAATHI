@@ -66,7 +66,7 @@ export default function Admin() {
 
 function BusEditor({ bus, route, onSaved, onError }) {
   const [form, setForm] = useState({
-    departure: bus.eta.scheduled, gate: bus.gate, capacity: bus.capacity, stops: bus.stops,
+    departure: bus.usual_departure ?? bus.eta.scheduled, gate: bus.gate, capacity: bus.capacity, stops: bus.stops,
   })
   const [busy, setBusy] = useState(false)
 
@@ -90,7 +90,7 @@ function BusEditor({ bus, route, onSaved, onError }) {
     <form className="card admin-bus form compact" onSubmit={save}>
       <div className="bus-number small">Bus {bus.id}</div>
       <div className="row">
-        <label>Leaves<input type="time" value={form.departure} required
+        <label>Usual departure<input type="time" value={form.departure} required
           onChange={(e) => setForm({ ...form, departure: e.target.value })} /></label>
         <label>Gate<input value={form.gate} maxLength={30} required
           onChange={(e) => setForm({ ...form, gate: e.target.value })} /></label>
@@ -144,11 +144,13 @@ function StopEditor({ route, onSaved, onError }) {
     <section className="card">
       <div className="row-between">
         <div className="eyebrow">Stops on {route.name}</div>
-        <span className="tiny muted">Pick a stop, then click the map where buses actually stop</span>
+        <span className="tiny muted">Pick a stop, then click the map where buses actually stop · ⚠ = estimated position</span>
       </div>
       <div className="chip-row">
         {route.stop_points.map((p) => (
-          <button type="button" key={p.id} className={`chip ${p.id === stopId ? 'on' : ''}`} onClick={() => pick(p.id)}>{p.name}</button>
+          <button type="button" key={p.id} className={`chip ${p.id === stopId ? 'on' : ''} ${p.coords_source === 'estimated' ? 'estimated' : ''}`}
+            title={p.coords_source === 'estimated' ? 'Position estimated, please check on the map' : p.coords_source === 'osm' ? 'Position from OpenStreetMap' : 'Position set by the office'}
+            onClick={() => pick(p.id)}>{p.coords_source === 'estimated' ? '⚠ ' : ''}{p.name}</button>
         ))}
       </div>
       <div className="map-wrap">

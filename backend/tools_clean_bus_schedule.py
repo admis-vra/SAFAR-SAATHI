@@ -40,7 +40,8 @@ def main():
 
     header = rows[0]
     out_header = [
-        "S.No.", "Reg. No.", "Bus No.", "Morning Trip", "Evening Trip",
+        # Both runs are pickups towards college (e.g. 7:00 AM and 11:00 AM); "No Service" = first run only.
+        "S.No.", "Reg. No.", "Bus No.", "1st Run Start", "2nd Run Start",
         "Driver Name", "Contact No.", "Route", "Seats",
     ]
     out_rows = []

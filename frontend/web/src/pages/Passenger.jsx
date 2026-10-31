@@ -8,6 +8,8 @@ import Announcements from '../components/Announcements'
 import FallbackModal from '../components/FallbackModal'
 import { notify } from '../prefs'
 import QueueCard from '../components/QueueCard'
+import { GoingHome, MorningBuses, StopPicker } from '../components/DailyPlans'
+import { useIsMorning, useStops } from '../plans'
 import { BottomNav, Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
 
 const EXAM_SLOTS = ['09:00', '11:00', '14:00']
@@ -38,6 +40,11 @@ export default function Passenger() {
   const [fallbackCheck, setFallbackCheck] = useState(0)  // >0: (re)check whether the last bus has left
   const [annTick, setAnnTick] = useState(0)
   const [forecast, setForecast] = useState(null)
+  const [liveTick, setLiveTick] = useState(0)   // bus moved: refresh the morning list
+  const [planTick, setPlanTick] = useState(0)   // slots or bus assignments changed
+  const [morning, setMorning] = useState(null)
+  const stops = useStops()
+  const isMorning = useIsMorning()
   const refreshTimer = useRef(null)
   const nearAlerted = useRef(null)
 
@@ -54,6 +61,7 @@ export default function Passenger() {
   const { buses, connected } = useLiveBuses((msg) => {
     if (needsProfile) return
     if (msg.type === 'queue' || msg.type === 'token_called') setQueueTick((t) => t + 1)
+    if (msg.type === 'demand') setPlanTick((t) => t + 1)
     if (msg.type === 'last_bus_left' && msg.route_id === profile?.route_id) setFallbackCheck((n) => n + 1)
     if (msg.type === 'announcement') {
       setAnnTick((n) => n + 1)
@@ -61,14 +69,17 @@ export default function Passenger() {
       if (a && (a.route_id == null || a.route_id === profile?.route_id)) notify('SafarSaathi notice', a.message)
     }
     clearTimeout(refreshTimer.current)
-    refreshTimer.current = setTimeout(loadBus, 300)
+    refreshTimer.current = setTimeout(() => { loadBus(); setLiveTick((n) => n + 1) }, 300)
   })
 
   useEffect(() => {
     api('/routes').then(setRoutes).catch(() => {})
     api('/me')
       .then((d) => {
-        if (d.profile) {
+        if (d.profile?.stale) {
+          setProfile(d.profile)
+          setNeedsProfile(true)
+        } else if (d.profile) {
           setProfile(d.profile)
           loadBus()
           setFallbackCheck(1)  // opening the app after the last bus left should show options too
@@ -99,6 +110,9 @@ export default function Passenger() {
   const mins = bus ? minutesUntil(bus.eta.predicted) : null
   const stopEta = mine?.my_stop_eta
   const busId = bus?.id
+  const morningIds = morning?.buses.filter((b) => ['arriving', 'coming', 'scheduled'].includes(b.state)).map((b) => b.bus_id) ?? []
+  const stopRoutes = stops.find((s) => s.name === profile?.stop)?.routes ?? (profile ? [profile.route_id] : [])
+  const focusId = isMorning ? morning?.next?.bus_id : bus?.id
 
   useEffect(() => {
     if (!busId) return
@@ -122,8 +136,9 @@ export default function Passenger() {
         <main className="content passenger-content">
           <section className="card">
             <h2>Finish your profile</h2>
-            <p className="muted">Tell us your stop so we can assign your bus.</p>
-            <ProfileForm routes={routes} onSaved={onSaved} onError={handleError} />
+            <p className="muted">{profile?.stale ? 'The bus timetable changed. Please choose your stop again.'
+              : 'Tell us your stop so we can show the buses that serve it.'}</p>
+            <ProfileForm profile={profile} routes={routes} stops={stops} onSaved={onSaved} onError={handleError} />
           </section>
         </main>
       </div>
@@ -133,7 +148,7 @@ export default function Passenger() {
   return (
     <div className="app has-bottom-nav">
       <TopBar title={profile ? `Hi, ${profile.name.split(' ')[0]}` : 'Passenger'}
-        subtitle={profile && `${route?.name ?? ''} · Stop ${profile.stop}`} connected={connected} home="/passenger" />
+        subtitle={profile && `Stop: ${profile.stop}`} connected={connected} home="/passenger" />
 
       <main className="content passenger-content">
         {error && <div className="alert bad">{error}</div>}
@@ -143,17 +158,19 @@ export default function Passenger() {
         <div className="passenger-grid">
           <div className="passenger-col-main">
 
-        {!mine && !error && <div className="card skeleton">Finding your bus…</div>}
+        {isMorning && profile && <MorningBuses stop={profile.stop} tick={liveTick} onData={setMorning} onError={handleError} />}
 
-        {mine && !bus && <div className="card"><p>No bus is assigned to your stop right now.</p></div>}
+        <GoingHome tick={planTick} onChanged={loadBus} onError={handleError} />
+
+        {!mine && !error && <div className="card skeleton">Finding your bus…</div>}
 
         {bus && (
           <section className="card bus-card">
             <div className="bus-card-head">
               <div>
-                <div className="eyebrow">{mine?.aboard ? 'You are on' : 'Your bus today'}</div>
+                <div className="eyebrow">{mine?.aboard ? 'You are on' : 'Your bus home'}</div>
                 <div className="bus-number">Bus {bus.id}</div>
-                <div className="muted">{bus.gate} · Stops {bus.stops.join(', ')}</div>
+                <div className="muted">{bus.gate} · {bus.route_name ?? `Stops ${bus.stops.join(', ')}`}</div>
               </div>
               <StatusPill status={bus.status} />
             </div>
@@ -228,14 +245,14 @@ export default function Passenger() {
                 <div className="row-between">
                   <div>
                     <div className="eyebrow">My stop</div>
-                    <div>{route?.name} · Stop {profile?.stop}{profile?.exam_slot && ` · Exam ${profile.exam_slot}`}</div>
+                    <div>{profile?.stop}{profile?.exam_slot && ` · Exam ${profile.exam_slot}`}</div>
                   </div>
                   <button className="btn ghost small" onClick={() => setEditing(true)}>Change</button>
                 </div>
               ) : (
                 <>
                   <div className="eyebrow">Change my stop</div>
-                  <ProfileForm profile={profile} routes={routes} onSaved={onSaved} onError={handleError}
+                  <ProfileForm profile={profile} routes={routes} stops={stops} onSaved={onSaved} onError={handleError}
                     onCancel={() => setEditing(false)} stopOnly />
                 </>
               )}
@@ -247,17 +264,18 @@ export default function Passenger() {
               <div className="row-between map-head-row">
                 <div>
                   <div className="eyebrow">Live Route Map</div>
-                  <div className="map-route-title">{route?.name ?? 'Campus Transit'}</div>
+                  <div className="map-route-title">{isMorning ? `Buses from ${profile?.stop ?? 'your stop'}` : route?.name ?? 'Campus Transit'}</div>
                 </div>
-                {bus && (
+                {focusId && (
                   <div className="map-bus-badge">
                     <span className="live-pulse" />
-                    <span>Bus {bus.id} tracking</span>
+                    <span>Bus {focusId} tracking</span>
                   </div>
                 )}
               </div>
-              <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={profile?.route_id} focusId={bus?.id} height={340} />
-              <LocationAge bus={bus ? buses[bus.id] ?? bus : null} />
+              <BusMap buses={Object.values(buses)} routes={routes} highlightRoutes={stopRoutes} focusId={focusId}
+                markIds={isMorning ? morningIds : bus ? [bus.id] : []} height={340} />
+              <LocationAge bus={focusId ? buses[focusId] ?? (bus?.id === focusId ? bus : null) : null} />
 
               {route && (
                 <div className="route-stops-bar">
@@ -266,7 +284,7 @@ export default function Passenger() {
                     {route.stops.map((s, idx) => (
                       <span key={s} className={`stop-pill ${s === profile?.stop ? 'current' : ''}`}>
                         <span className="stop-num">{idx + 1}</span>
-                        <span className="stop-char">Stop {s}</span>
+                        <span className="stop-char">{s}</span>
                         {s === profile?.stop && <span className="stop-tag">You</span>}
                       </span>
                     ))}
@@ -282,20 +300,20 @@ export default function Passenger() {
   )
 }
 
-export function ProfileForm({ profile, routes, onSaved, onError, onCancel, stopOnly = false }) {
+export function ProfileForm({ profile, routes, stops, onSaved, onError, onCancel, stopOnly = false }) {
   const [form, setForm] = useState({
     name: profile?.name ?? '',
     student_id: profile?.student_id ?? '',
-    route_id: profile ? String(profile.route_id) : '',
-    stop: profile?.stop ?? '',
+    route_id: profile && !profile.stale ? profile.route_id : null,
+    stop: profile && !profile.stale ? profile.stop : '',
     exam_slot: profile?.exam_slot ?? '',
   })
   const [busy, setBusy] = useState(false)
-  const stops = routes.find((r) => r.id === Number(form.route_id))?.stops ?? []
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value, ...(k === 'route_id' ? { stop: '' } : {}) }))
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
 
   const save = async (e) => {
     e.preventDefault()
+    if (!form.stop) return onError({ message: 'Choose your stop from the list.' })
     setBusy(true)
     const body = {
       name: form.name.trim(),
@@ -327,22 +345,8 @@ export function ProfileForm({ profile, routes, onSaved, onError, onCancel, stopO
           </label>
         </div>
       )}
-      <div className="row">
-        <label>
-          Route
-          <select value={form.route_id} onChange={set('route_id')} required>
-            <option value="">Choose…</option>
-            {routes.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-          </select>
-        </label>
-        <label>
-          Stop
-          <select value={form.stop} onChange={set('stop')} required disabled={!stops.length}>
-            <option value="">Choose…</option>
-            {stops.map((s) => <option key={s} value={s}>Stop {s}</option>)}
-          </select>
-        </label>
-      </div>
+      <StopPicker stops={stops} routes={routes} value={form.stop} routeId={form.route_id}
+        onChange={({ stop, route_id }) => setForm((f) => ({ ...f, stop, route_id }))} />
       <label>
         Exam shift
         <select value={form.exam_slot} onChange={set('exam_slot')}>
@@ -352,7 +356,7 @@ export function ProfileForm({ profile, routes, onSaved, onError, onCancel, stopO
       </label>
       <div className="row-end">
         {onCancel && <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>}
-        <button className="btn primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+        <button className="btn primary" disabled={busy || !form.stop}>{busy ? 'Saving…' : 'Save'}</button>
       </div>
     </form>
   )

@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react'
 
 // Device-level UI preferences (not account data), kept in localStorage.
 const KEY = 'safarsaathi.prefs'
-const DEFAULTS = { theme: 'system', largeText: false, notifications: false, sounds: true, hindi: true }
+const DEFAULTS = { theme: 'system', largeText: false, notifications: false, sounds: true }
 
 function read() {
   try {

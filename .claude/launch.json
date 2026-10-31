@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend/web", "run", "dev", "--", "--port", "5173", "--strictPort"],
+      "port": 5173
+    },
+    {
+      "name": "api-8010",
+      "runtimeExecutable": "backend/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "main:app", "--app-dir", "backend", "--port", "8010"],
+      "port": 8010
+    },
+    {
+      "name": "web-5175",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set SAFAR_API=http://localhost:8010&& npm --prefix frontend/web run dev -- --port 5175 --strictPort"],
+      "port": 5175
+    }
+  ]
+}

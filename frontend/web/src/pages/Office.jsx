@@ -5,6 +5,7 @@ import { useLiveBuses, useRoutes } from '../live'
 import BusMap from '../components/BusMap'
 import Icon from '../components/Icon'
 import { AnnouncementPanel, IssuesPanel } from '../components/OfficePanels'
+import { DemandBoard } from '../components/DailyPlans'
 import { SeatMeter, StatusPill, TopBar } from '../components/ui'
 
 const SLOTS = ['09:00', '11:00', '14:00']
@@ -19,6 +20,7 @@ export default function Office() {
   const [queueTick, setQueueTick] = useState(0)
   const [annTick, setAnnTick] = useState(0)
   const [issueTick, setIssueTick] = useState(0)
+  const [planTick, setPlanTick] = useState(0)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
 
@@ -36,6 +38,7 @@ export default function Office() {
     if (msg.type === 'queue' || msg.type === 'token_called') setQueueTick((t) => t + 1)
     if (msg.type === 'announcement') setAnnTick((t) => t + 1)
     if (msg.type === 'issue') setIssueTick((t) => t + 1)
+    if (msg.type === 'demand') setPlanTick((t) => t + 1)
     if (msg.type === 'last_bus_left') {
       const route = routes.find((r) => r.id === msg.route_id)
       setNotice(`Last bus of ${route?.name ?? `route ${msg.route_id}`} (Bus ${msg.bus_id}) has left. ` +
@@ -112,6 +115,8 @@ export default function Office() {
           </section>
         </div>
 
+        <DemandBoard tick={planTick} onError={fail} />
+
         <section className="bus-tiles">
           {list.map((b) => (
             <BusTile key={b.id} bus={b} route={routes.find((r) => r.id === b.route_id)}
@@ -142,7 +147,7 @@ function BusTile({ bus, route, selected, onClick }) {
         <div className="bus-number small">Bus {bus.id}</div>
         <StatusPill status={bus.status} />
       </div>
-      <div className="tiny muted">{route?.name ?? `Route ${bus.route_id}`} · {bus.gate} · {bus.eta.predicted}</div>
+      <div className="tiny muted">{route?.name ?? `Route ${bus.route_id}`} · {bus.slot ? `home ${bus.slot}` : `usual ${bus.eta.predicted}`}</div>
       <SeatMeter bus={bus} />
       <div className="tile-facts tiny">
         <span>{where}{bus.speed_kmh ? ` · ${Math.round(bus.speed_kmh)} km/h` : ''}</span>

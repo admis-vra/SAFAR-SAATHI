@@ -4,9 +4,11 @@ import { useLiveBuses, useRoutes } from '../live'
 import BusMap from '../components/BusMap'
 import { DEMO_PATH } from '../geo'
 import { BottomNav, Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
-import { notify, usePrefs } from '../prefs'
+import { notify } from '../prefs'
 import Announcements from '../components/Announcements'
 import { enqueue, flush, pending } from '../outbox'
+import { BusPicker, SlotAssign } from '../components/DailyPlans'
+import { slotLabel } from '../plans'
 
 const GPS_SEND_MS = 5000
 const GPS_HEARTBEAT_MS = 15000
@@ -20,6 +22,8 @@ export default function Staff() {
   const [notice, setNotice] = useState('')
   const [queueTick, setQueueTick] = useState(0)
   const [annTick, setAnnTick] = useState(0)
+  const [planTick, setPlanTick] = useState(0)
+  const [picking, setPicking] = useState(false)
   const reloadTimer = useRef(null)
   const routes = useRoutes()
 
@@ -36,6 +40,7 @@ export default function Staff() {
   const { buses, connected } = useLiveBuses((msg) => {
     if (msg.type === 'alert' && msg.bus_id === busId) setNotice(msg.message)
     if (msg.type === 'announcement') setAnnTick((n) => n + 1)
+    if (msg.type === 'demand') setPlanTick((n) => n + 1)
     if (msg.type === 'incident' && msg.kind === 'sos' && msg.bus_id === busId && msg.open === false) {
       notify('SOS acknowledged', 'The control room has seen your SOS and will call you.')
     }
@@ -44,10 +49,11 @@ export default function Staff() {
     reloadTimer.current = setTimeout(loadRiders, 400)
   })
 
+  const loadMe = useCallback(() => { api('/me').then(setMe).catch(fail) }, [fail])
   useEffect(() => {
-    api('/me').then(setMe).catch(fail)
+    loadMe()
     return () => clearTimeout(reloadTimer.current)
-  }, [fail])
+  }, [loadMe])
 
   useEffect(loadRiders, [loadRiders])
 
@@ -63,15 +69,36 @@ export default function Staff() {
     }
   }
 
-  if (!me || !bus) {
+  if (!me) {
     return <div className="app"><main className="content staff-content">{error ? <div className="alert bad">{error}</div> : <div className="card skeleton">Loading…</div>}</main></div>
+  }
+
+  const onPicked = () => { setPicking(false); setError(''); loadMe() }
+  if (!bus || !me.picked_today || picking) {
+    return (
+      <div className="app has-bottom-nav">
+        <TopBar title={`${me.name} · ${isDriver ? 'Driver' : 'Conductor'}`} subtitle="Choose today’s bus" connected={connected} home="/staff" />
+        <main className="content staff-content">
+          {error && <div className="alert bad" role="alert">{error}</div>}
+          <BusPicker current={busId} onPicked={onPicked} onError={fail}
+            onCancel={bus && me.picked_today ? () => setPicking(false) : null} />
+          {bus && !me.picked_today && (
+            <button className="btn ghost"
+              onClick={() => api('/me/bus-pick', { method: 'PUT', body: { bus_id: bus.id } }).then(onPicked).catch(fail)}>
+              Continue with Bus {bus.id} (my usual bus)
+            </button>
+          )}
+        </main>
+        <BottomNav home="/staff" />
+      </div>
+    )
   }
 
   return (
     <div className="app has-bottom-nav">
       <TopBar title={`${me.name} · ${isDriver ? 'Driver' : 'Conductor'}`} subtitle={`Bus ${bus.id}`} connected={connected} home="/staff" />
 
-      <main className="content">
+      <main className="content staff-content">
         {error && <div className="alert bad" role="alert">{error}</div>}
         <Announcements routeId={bus.route_id} tick={annTick} />
         {notice && (
@@ -87,11 +114,18 @@ export default function Staff() {
         <section className="card bus-card">
           <div className="bus-card-head">
             <div>
-              <div className="eyebrow">Your bus</div>
+              <div className="eyebrow">Your bus today</div>
               <div className="bus-number">Bus {bus.id}</div>
-              <div className="muted">{bus.gate} · Stops {bus.stops.join(', ')}</div>
+              <div className="muted">{bus.route_name ?? `Stops ${bus.stops.join(', ')}`}</div>
+              <div className="tiny muted">
+                {bus.runs?.length ? `Morning run${bus.runs.length > 1 ? 's' : ''} ${bus.runs.join(' & ')}` : ''}
+                {bus.slot ? ` · Home trip ${slotLabel(bus.slot)}` : ''}
+              </div>
             </div>
-            <StatusPill status={bus.status} />
+            <div className="row gap-s">
+              <StatusPill status={bus.status} />
+              <button className="btn ghost small" onClick={() => setPicking(true)}>Change bus</button>
+            </div>
           </div>
           <div className="grid-2">
             <div className="stat"><div className="eyebrow">Departure</div><Eta eta={bus.eta} /></div>
@@ -99,15 +133,16 @@ export default function Staff() {
           </div>
         </section>
 
-        {isDriver && <GpsShare busId={bus.id} onError={fail} />}
+        {isDriver && <GpsShare key={bus.id} busId={bus.id} onError={fail} />}
 
         <TripState bus={bus} />
+
+        <SlotAssign key={`slot-${bus.id}`} bus={bus} tick={planTick} onError={fail} />
 
         {(bus.status === 'scheduled' || bus.status === 'boarding') && (
           <section className="card">
             <BigButton tone="good" active={bus.status === 'boarding'} onClick={() => setStatus('boarding')}
-              en={bus.status === 'boarding' ? 'Boarding open · calling the queue' : 'Open boarding'}
-              hi="बोर्डिंग खोलें" />
+              en={bus.status === 'boarding' ? 'Boarding open · calling the queue' : 'Open boarding'} />
           </section>
         )}
 
@@ -116,15 +151,15 @@ export default function Staff() {
         <StaffQueue busId={bus.id} tick={queueTick} onError={fail} />
 
         <details className="card override">
-          <summary className="eyebrow">Manual override · <span lang="hi">मैनुअल</span></summary>
+          <summary className="eyebrow">Manual override</summary>
           <p className="tiny muted">Trips start and end on their own from GPS. Use these only if that fails.</p>
           <div className="big-buttons">
             <BigButton tone="info" active={bus.status === 'departed'} onClick={() => setStatus('departed')}
-              en="Start trip" hi="यात्रा शुरू करें" />
+              en="Start trip" />
             <BigButton tone="bad" active={bus.status === 'full'} onClick={() => setStatus('full')}
-              en="Bus full" hi="बस भर गई" />
+              en="Bus full" />
             <BigButton tone="neutral" active={bus.status === 'scheduled'} onClick={() => setStatus('scheduled')}
-              en="Reset" hi="रीसेट" />
+              en="Reset" />
           </div>
         </details>
 
@@ -189,16 +224,15 @@ export default function Staff() {
 }
 
 function TripState({ bus }) {
-  const { hindi } = usePrefs()
   const t = bus.trip ?? {}
-  const [en, hi, tone] = t.in_depot ? ['At campus', 'कैंपस में', 'neutral']
-    : t.at_stop ? [`At stop ${t.at_stop}`, `स्टॉप ${t.at_stop} पर`, 'good']
-      : bus.status === 'departed' ? ['On the road', 'रास्ते में', 'info']
-        : ['Waiting for GPS', 'जीपीएस का इंतज़ार', 'neutral']
+  const [en, tone] = t.in_depot ? ['At campus', 'neutral']
+    : t.at_stop ? [`At stop ${t.at_stop}`, 'good']
+      : bus.status === 'departed' ? ['On the road', 'info']
+        : ['Waiting for GPS', 'neutral']
   return (
     <section className={`card trip-state ${tone}`}>
       <div className="eyebrow">Trip · automatic</div>
-      <div className="trip-state-main">{en} {hindi && <span className="muted" lang="hi">· {hi}</span>}</div>
+      <div className="trip-state-main">{en}</div>
       <div className="tiny muted">
         {t.id ? `Trip ${t.id} started automatically when the bus left campus.` :
           'The trip starts by itself when the bus leaves campus. Nothing to press.'}
@@ -248,7 +282,7 @@ function SosButton({ bus, onError }) {
   if (bus.sos) {
     return (
       <section className="card sos-sent" role="status">
-        <div className="sos-sent-title">SOS sent · <span lang="hi">मदद भेजी गई</span></div>
+        <div className="sos-sent-title">SOS sent</div>
         <div className="small-text">The control room has your location and will call you. Stay with the bus.</div>
       </section>
     )
@@ -258,7 +292,7 @@ function SosButton({ bus, onError }) {
       onContextMenu={(e) => e.preventDefault()} disabled={sending} aria-label="Hold for 2 seconds to send SOS">
       <span className="sos-fill" style={{ transform: `scaleX(${progress})` }} />
       <span className="sos-label">{sending ? 'Sending…' : 'SOS'}</span>
-      <span className="sos-hint">Hold 2 seconds · <span lang="hi">2 सेकंड दबाए रखें</span></span>
+      <span className="sos-hint">Hold 2 seconds</span>
     </button>
   )
 }
@@ -313,7 +347,7 @@ function StaffQueue({ busId, tick, onError }) {
   return (
     <section className="card">
       <div className="row-between">
-        <div className="eyebrow">Queue · <span lang="hi">कतार</span></div>
+        <div className="eyebrow">Queue</div>
         <span className="tiny muted">{waiting.length} waiting · {boarded.length} boarded · {data.queue.state}</span>
       </div>
       {unsynced > 0 && (
@@ -349,12 +383,10 @@ function StaffQueue({ busId, tick, onError }) {
   )
 }
 
-function BigButton({ en, hi, tone, active, onClick }) {
-  const { hindi } = usePrefs()
+function BigButton({ en, tone, active, onClick }) {
   return (
     <button className={`big-btn ${tone} ${active ? 'active' : ''}`} onClick={onClick} aria-pressed={active}>
       <span className="big-btn-en">{en}</span>
-      {hindi && <span className="big-btn-hi" lang="hi">{hi}</span>}
     </button>
   )
 }
@@ -460,7 +492,7 @@ function GpsShare({ busId, onError }) {
     <section className={`card gps-card ${mode !== 'off' ? 'on' : ''}`}>
       <div className="row-between">
         <div>
-          <div className="eyebrow">Live location · <span lang="hi">लोकेशन शेयर</span></div>
+          <div className="eyebrow">Live location</div>
           <div className={mode === 'off' ? 'muted' : 'good-text'}>
             {mode === 'off' ? 'Not sharing. Students can’t see your bus.' : mode === 'gps' ? 'Students can see your bus live' : 'Sharing demo route'}
           </div>
@@ -517,7 +549,7 @@ function ManualCount({ bus, onError }) {
 
   return (
     <section className="card">
-      <div className="eyebrow">Passenger count · <span lang="hi">यात्री गिनती</span></div>
+      <div className="eyebrow">Passenger count</div>
       <p className="tiny muted">Use this if the bus camera is down. It replaces the camera reading.</p>
       <div className="stepper">
         <button className="btn ghost step" onClick={() => setCount((c) => clamp(c - 1))} aria-label="One less">−</button>
