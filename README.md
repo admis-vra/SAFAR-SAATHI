@@ -92,6 +92,30 @@ What the backend does with it:
 - **For a real pilot:** use Mosquitto with a password per device and an ACL so each bus can publish only its own
   topic. See `tools/mosquitto/`. Over GSM the broker must be reachable from the internet, unlike the laptop broker.
 
+### Zero-touch trips (geofencing) + SOS
+
+Trips start and end from the bus's own GPS, so the driver doesn't need to tap anything:
+
+| Geofence event | Effect |
+|---|---|
+| Bus **leaves the campus** fence (`depots`, 150 m) | Opens a trip, status `departed`. `is_last_bus` is set if it's the route's latest departure. |
+| Bus **enters / leaves a stop** fence (`stops.geofence_radius_meters`, 60 m) | `stop_enter` / `stop_exit` recorded in `trip_events` |
+| Bus reaches the route's **far end (stop A)** or **re-enters campus** | Closes the trip, status `scheduled` |
+
+- **Jitter-proof:** a change counts only after 2 consecutive GPS fixes agree, and leaving needs the bus 20% beyond the
+  radius. A bus wobbling at a fence edge doesn't flap.
+- **Late data** (readings more than 2 min old, e.g. a backlog after a network drop) still updates trips and
+  `trip_events` (with `late = true`) but **never pushes live alerts**.
+- **Manual override:** the driver's status buttons still work, and each press is logged as a `manual_status` event.
+- **SOS:** from the device (`sos_active`) or the driver (`POST /buses/{id}/sos`), it opens one `sos` incident per bus
+  with its location. It stays open until a **dispatcher** acknowledges it, even if the button is released. A late
+  SOS is still raised and marked "reported late": a delayed alarm is still an alarm.
+- **Dispatcher accounts:** set `app_metadata` `{"role": "dispatcher", "name": "Control Room"}` with the same SQL
+  used for drivers, without `bus_id`. The `/office` page for them is M7. Until then a dispatcher logging into the
+  website lands on the student page, which won't work, so use `/docs` for now.
+- **Known gap:** trips are detected when they **start at campus** (afternoon departures, which the last-bus
+  feature needs). Morning trips that start at stop A aren't auto-detected yet.
+
 ### Website (passenger + driver/conductor)
 
 ```bash
@@ -154,13 +178,16 @@ Base URL: `http://<host>:8000`. All JSON. 🔒 = needs `Authorization: Bearer <S
 | GET | `/buses/{id}` | everyone | one `BusView` |
 | POST | `/buses/{id}/count` | vision, conductor | `{count, seats_free?, seats_total?}`: seat fields optional, sent together |
 | POST | `/buses/{id}/location` 🔒 | driver/conductor **of that bus** | `{lat, lng}` |
-| POST | `/buses/{id}/status` 🔒 | driver/conductor **of that bus** | `{status: scheduled\|boarding\|departed\|full}` |
+| POST | `/buses/{id}/status` 🔒 | driver/conductor **of that bus** | `{status: scheduled\|boarding\|departed\|full}`: manual override, logged |
+| POST | `/buses/{id}/sos` 🔒 | driver/conductor **of that bus** | opens (or returns) the bus's SOS incident → `{incident_id}` |
+| GET | `/incidents?open=true` 🔒 | dispatcher | open SOS / device-offline incidents with location (`open=false` = last 200) |
+| POST | `/incidents/{id}/ack` 🔒 | dispatcher | acknowledge; the only way an SOS closes |
 | GET | `/buses/{id}/passengers` 🔒 | driver/conductor **of that bus** | students booked on the bus, in stop order |
 | POST | `/ingest/telemetry` | bus device (`X-Device-Token`) | one blueprint payload → `{accepted, duplicates, live_updated}` |
 | POST | `/ingest/backlog` | bus device (`X-Device-Token`) | array of payloads (≤2000), stored as history |
 | GET | `/planner?slot=11:00` | dashboard | students per route for an exam slot + extra-trip suggestions (≥30 students) |
 | GET | `/dashboard/summary` | dashboard | buses, totals, half-empty and full bus ids |
-| WS | `/ws` | student app, dashboard | pushes `{type:"buses",data:[...]}`, `{type:"bus",data:BusView}`, `{type:"alert",bus_id,message}`, `{type:"incident",bus_id,kind,open}` |
+| WS | `/ws` | student app, dashboard | pushes `{type:"buses",data:[...]}`, `{type:"bus",data:BusView}`, `{type:"alert",bus_id,message}`, `{type:"incident",id,bus_id,kind,open,late?,location?}`, `{type:"trip_event",bus_id,kind,stop,ts}` |
 
 `BusView`:
 
@@ -170,7 +197,8 @@ Base URL: `http://<host>:8000`. All JSON. 🔒 = needs `Authorization: Bearer <S
  "status": "boarding", "location": {"lat": 30.27, "lng": 78.0}, "speed_kmh": 24.5,
  "eta": {"scheduled": "13:15", "predicted": "13:18", "delay_min": 3.2, "source": "model|baseline|timetable"},
  "updated_at": "2026-10-31T13:02:11",
- "device": {"id": "B-14", "online": true, "last_reading": "2026-10-31T07:32:10+00:00", "ir_net": 28}}
+ "device": {"id": "B-14", "online": true, "last_reading": "2026-10-31T07:32:10+00:00", "ir_net": 28},
+ "trip": {"id": 42, "in_depot": false, "at_stop": "E"}, "sos": false}
 ```
 
 Occupancy = the latest people count from the bus (IR door counter or camera, whichever reported last; M4 adds
@@ -204,4 +232,4 @@ Use two phones (or two browsers): one logged in as a student, one as the Bus 14 
   firmware (M8) publishes the same payload but hasn't been built or tested on hardware yet.
 - Login needs internet, since Supabase is a cloud service. Test the venue Wi-Fi early, and keep a phone hotspot as backup.
 - `/count` has no device key yet, so anyone on the network could post counts. It needs one before a real pilot.
-- Map positions (campus, route line) and all stop coordinates in the database are approximate **sample** coordinates, not surveyed.
+- Map positions (campus, route line), the campus geofence and all stop coordinates in the database are approximate **sample** coordinates, not surveyed. Geofencing is only as accurate as these, so survey them before a test ride.

@@ -17,6 +17,7 @@ if not SUPABASE_URL:
 ISSUER = f"{SUPABASE_URL}/auth/v1"
 _jwks = jwt.PyJWKClient(f"{ISSUER}/.well-known/jwks.json", cache_keys=True, lifespan=3600)
 STAFF_ROLES = {"driver", "conductor"}
+ADMIN_ROLES = {"dispatcher"}
 
 
 def _decode(token: str) -> dict:
@@ -43,7 +44,7 @@ def current_user(authorization: str | None = Header(default=None)) -> dict:
     # app_metadata can only be set by an admin, so roles come from there, never from user_metadata.
     app_meta = claims.get("app_metadata") or {}
     user_meta = claims.get("user_metadata") or {}
-    role = app_meta.get("role") if app_meta.get("role") in STAFF_ROLES else "passenger"
+    role = app_meta.get("role") if app_meta.get("role") in STAFF_ROLES | ADMIN_ROLES else "passenger"
     bus_id = None
     if role in STAFF_ROLES:
         try:

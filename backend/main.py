@@ -16,12 +16,14 @@ import db
 import ingest
 from auth import current_user
 from eta import predict_delay_minutes
+from geofence import BusFence, Zone
 
 log = logging.getLogger("safarsaathi")
 
 EXTRA_TRIP_THRESHOLD = 30
 OFFLINE_AFTER_S = 30
 OFFLINE_CHECK_EVERY_S = 5
+LATE_AFTER_S = 120  # data older than this updates history but never sends live alerts
 
 routes: dict[int, dict] = {}
 stop_ids: dict[tuple[int, str], int] = {}
@@ -48,6 +50,12 @@ async def load_state():
     buses.clear(); buses.update({b["id"]: b for b in await db.load_buses()})
     for bus_id, incident_id in (await db.open_incidents("device_offline")).items():
         buses[bus_id]["offline_incident"] = incident_id
+    for bus_id, incident_id in (await db.open_sos_incidents()).items():
+        buses[bus_id]["sos_incident"] = incident_id
+    depot = await db.load_depot()
+    for bus in buses.values():
+        bus["fence"] = build_fence(bus, depot)
+        bus["fence_ts"] = bus.get("last_device_ts")
     students.clear()
     exam_demand[:] = _demo_exam_demand()
     for p in await db.all_profiles():
@@ -56,6 +64,18 @@ async def load_state():
         if result["bus"]:
             p["bus_id"] = result["bus"]["id"]
             buses[p["bus_id"]]["assigned"] += 1
+
+
+def build_fence(bus: dict, depot: dict) -> BusFence:
+    points = routes[bus["route_id"]]["stop_points"]
+    zones = [Zone("depot", "depot", depot["name"], depot["lat"], depot["lng"], depot["radius"])]
+    # Stops are ordered A (far end) -> G (near campus); A is where an outbound trip ends.
+    zones += [Zone(f"stop:{p['id']}", "stop", p["name"], p["lat"], p["lng"], p["geofence_m"],
+                   stop_id=p["id"], terminal=(i == 0)) for i, p in enumerate(points)]
+    fence = BusFence(zones)
+    if bus["location"]:
+        fence.seed(bus["location"]["lat"], bus["location"]["lng"])
+    return fence
 
 
 @asynccontextmanager
@@ -182,6 +202,13 @@ def bus_view(bus: dict) -> dict:
             "last_reading": bus["last_device_ts"].isoformat() if bus.get("last_device_ts") else None,
             "ir_net": bus.get("ir_net"),
         },
+        "trip": {
+            "id": bus.get("trip_id"),
+            "in_depot": "depot" in bus["fence"].inside if bus.get("fence") else None,
+            "at_stop": next((z.name for z in bus["fence"].zones if z.kind == "stop" and z.key in bus["fence"].inside),
+                            None) if bus.get("fence") else None,
+        },
+        "sos": bool(bus.get("sos_incident")),
     }
 
 
@@ -227,10 +254,16 @@ async def apply_device_telemetry(device_id: str, items: list[ingest.Telemetry], 
         await db.close_incident(bus.pop("offline_incident"))
         await hub.broadcast({"type": "incident", "bus_id": bus["id"], "kind": "device_offline", "open": False})
 
+    await handle_device_sos(bus, fresh)
+    trip_changed = await run_geofence(bus, fresh)
+
     # Only a reading newer than what we already show may move the live state (late/out-of-order data is
-    # history only). Replayed backlog never triggers alerts; that rule matters once M3 adds geofence events.
+    # history only).
     latest = fresh[-1] if fresh else None
     live = latest is not None and (bus.get("last_device_ts") is None or latest.ts > bus["last_device_ts"])
+    if trip_changed and not live:
+        await db.save_live_state(bus)
+        await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     if live:
         bus["last_device_ts"] = latest.ts
         if latest.has_fix:
@@ -242,6 +275,69 @@ async def apply_device_telemetry(device_id: str, items: list[ingest.Telemetry], 
         await db.save_live_state(bus)
         await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     return {"accepted": len(fresh), "duplicates": len(items) - len(fresh), "live_updated": live}
+
+
+def is_late(ts: datetime) -> bool:
+    return (datetime.now(timezone.utc) - ts).total_seconds() > LATE_AFTER_S
+
+
+async def start_trip(bus: dict):
+    bus["trip_id"] = await db.open_trip(bus)
+    bus["status"] = "departed"
+
+
+async def end_trip(bus: dict):
+    await db.close_trip(bus["id"])
+    bus["trip_id"] = None
+    bus["status"] = "scheduled"
+
+
+async def run_geofence(bus: dict, readings: list[ingest.Telemetry]) -> bool:
+    """Feed readings (oldest first) through the bus's fences; returns True if a trip started or ended."""
+    changed = False
+    for r in readings:
+        if bus.get("fence_ts") and r.ts <= bus["fence_ts"]:
+            continue  # out of order: already past this point
+        bus["fence_ts"] = r.ts
+        if not r.has_fix:
+            continue
+        late = is_late(r.ts)
+        for action, zone in bus["fence"].update(r.gps.lat, r.gps.lon):
+            kind = f"{zone.kind}_{action}"
+            if kind == "depot_exit" and not bus.get("trip_id"):
+                await start_trip(bus)
+                changed = True
+            await db.insert_trip_event(bus["id"], bus.get("trip_id"), kind, r.ts, zone.stop_id, late)
+            ends_trip = kind == "depot_enter" or (kind == "stop_enter" and zone.terminal)
+            if ends_trip and bus.get("trip_id"):
+                await end_trip(bus)
+                changed = True
+            if not late:
+                await hub.broadcast({"type": "trip_event", "bus_id": bus["id"], "kind": kind,
+                                     "stop": zone.name if zone.kind == "stop" else None, "ts": r.ts.isoformat()})
+    return changed
+
+
+async def raise_sos(bus: dict, lat: float | None, lng: float | None, late: bool, detail: str) -> int:
+    if bus.get("sos_incident"):
+        return bus["sos_incident"]
+    bus["sos_incident"] = await db.open_sos(bus["id"], bus.get("trip_id"), lat, lng, late, detail)
+    # SOS is always pushed, even from late data: a safety alarm that arrives late is still an alarm.
+    await hub.broadcast({"type": "incident", "id": bus["sos_incident"], "bus_id": bus["id"], "kind": "sos",
+                         "open": True, "late": late, "detail": detail,
+                         "location": {"lat": lat, "lng": lng} if lat is not None else None})
+    await hub.broadcast({"type": "bus", "data": bus_view(bus)})
+    return bus["sos_incident"]
+
+
+async def handle_device_sos(bus: dict, readings: list[ingest.Telemetry]):
+    for r in readings:
+        if r.sos_active and not bus.get("sos_incident"):
+            loc = (r.gps.lat, r.gps.lon) if r.has_fix else (
+                (bus["location"]["lat"], bus["location"]["lng"]) if bus["location"] else (None, None))
+            late = is_late(r.ts)
+            await raise_sos(bus, *loc, late, "SOS button on bus device" + (" (reported late)" if late else ""))
+            return
 
 
 async def check_offline(now: float):
@@ -365,6 +461,8 @@ async def me(user: dict = Depends(current_user)):
         except HTTPException:
             profile = None
         return {**public, "profile": profile}
+    if user["role"] == "dispatcher":
+        return public
     if user["bus_id"] not in buses:
         raise HTTPException(403, "Your staff account has no valid bus. Ask the transport office.")
     return {**public, "bus": bus_view(buses[user["bus_id"]])}
@@ -421,19 +519,58 @@ async def report_location(bus_id: int, body: LocationIn, _: dict = Depends(requi
 
 
 @app.post("/buses/{bus_id}/status")
-async def report_status(bus_id: int, body: StatusIn, _: dict = Depends(require_bus_staff)):
+async def report_status(bus_id: int, body: StatusIn, user: dict = Depends(require_bus_staff)):
+    """Manual override; normally the geofence sets departed/scheduled on its own."""
     if body.status not in {"scheduled", "boarding", "departed", "full"}:
         raise HTTPException(400, "status must be scheduled|boarding|departed|full")
     bus = buses.get(bus_id) or _404()
-    bus["status"] = body.status
-    if body.status == "departed":
-        bus["trip_id"] = await db.open_trip(bus)
+    if body.status == "departed" and not bus.get("trip_id"):
+        await start_trip(bus)
     elif body.status == "scheduled" and bus.get("trip_id"):
-        await db.close_trip(bus_id)
-        bus["trip_id"] = None
+        await end_trip(bus)
+    bus["status"] = body.status
+    await db.insert_trip_event(bus_id, bus.get("trip_id"), "manual_status", datetime.now(timezone.utc),
+                               detail=f"{body.status} by {user['name']} ({user['role']})")
     await persist(bus, telemetry=False)
     await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     return bus_view(bus)
+
+
+@app.post("/buses/{bus_id}/sos")
+async def driver_sos(bus_id: int, user: dict = Depends(require_bus_staff)):
+    bus = buses.get(bus_id) or _404()
+    loc = bus["location"] or {}
+    incident_id = await raise_sos(bus, loc.get("lat"), loc.get("lng"), False,
+                                  f"SOS pressed by {user['name']} ({user['role']})")
+    return {"incident_id": incident_id}
+
+
+def require_dispatcher(user: dict = Depends(current_user)) -> dict:
+    if user["role"] != "dispatcher":
+        raise HTTPException(403, "Dispatchers only.")
+    return user
+
+
+@app.get("/incidents")
+async def incidents(open: bool = True, _: dict = Depends(require_dispatcher)):
+    return await db.list_incidents(only_open=open)
+
+
+@app.post("/incidents/{incident_id}/ack")
+async def acknowledge(incident_id: int, user: dict = Depends(require_dispatcher)):
+    row = await db.acknowledge_incident(incident_id, user["id"])
+    if row is None:
+        raise HTTPException(404, "No such open incident (already acknowledged?).")
+    bus = buses.get(row["bus_id"])
+    if bus and row["kind"] == "sos" and bus.get("sos_incident") == incident_id:
+        bus.pop("sos_incident")
+    if bus and row["kind"] == "device_offline" and bus.get("offline_incident") == incident_id:
+        bus.pop("offline_incident")
+    await hub.broadcast({"type": "incident", "id": incident_id, "bus_id": row["bus_id"], "kind": row["kind"],
+                         "open": False, "acknowledged_by": user["name"]})
+    if bus:
+        await hub.broadcast({"type": "bus", "data": bus_view(bus)})
+    return {"acknowledged": incident_id}
 
 
 @app.get("/buses/{bus_id}/passengers")

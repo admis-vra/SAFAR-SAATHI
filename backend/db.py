@@ -34,7 +34,7 @@ async def load_routes() -> tuple[dict, dict]:
     for r in rows:
         route = routes.setdefault(r["id"], {"id": r["id"], "name": r["name"], "stops": [], "stop_points": []})
         route["stops"].append(r["stop_name"])
-        route["stop_points"].append({"name": r["stop_name"], "lat": r["lat"], "lng": r["lng"],
+        route["stop_points"].append({"id": r["stop_id"], "name": r["stop_name"], "lat": r["lat"], "lng": r["lng"],
                                      "geofence_m": r["radius"]})
         stop_ids[(r["id"], r["stop_name"])] = r["stop_id"]
     return routes, stop_ids
@@ -121,6 +121,56 @@ async def open_incidents(kind: str) -> dict[int, int]:
     return {r["bus_id"]: r["id"] for r in rows}
 
 
+async def load_depot() -> dict:
+    r = await pool.fetchrow("select id, name, st_y(location::geometry) as lat, st_x(location::geometry) as lng, "
+                            "geofence_radius_meters as radius from depots order by id limit 1")
+    return dict(r)
+
+
+async def insert_trip_event(bus_id: int, trip_id: int | None, kind: str, ts: datetime,
+                            stop_id: int | None = None, late: bool = False, detail: str | None = None):
+    await pool.execute(
+        "insert into trip_events (bus_id, trip_id, kind, stop_id, ts, late, detail) "
+        "values ($1, $2, $3::trip_event_kind, $4, $5, $6, $7)",
+        bus_id, trip_id, kind, stop_id, ts, late, detail)
+
+
+async def open_sos(bus_id: int, trip_id: int | None, lat: float | None, lng: float | None,
+                   late: bool, detail: str) -> int:
+    return await pool.fetchval("""
+        insert into incidents (bus_id, trip_id, kind, detail, late, location)
+        values ($1, $2, 'sos', $3, $4,
+                case when $5::float8 is null then null
+                     else st_setsrid(st_makepoint($6::float8, $5::float8), 4326)::geography end)
+        returning id""", bus_id, trip_id, detail, late, lat, lng)
+
+
+async def open_sos_incidents() -> dict[int, int]:
+    rows = await pool.fetch("select bus_id, max(id) as id from incidents where kind = 'sos' "
+                            "and acknowledged_at is null group by bus_id")
+    return {r["bus_id"]: r["id"] for r in rows}
+
+
+async def acknowledge_incident(incident_id: int, user_id: str) -> dict | None:
+    r = await pool.fetchrow("""
+        update incidents set acknowledged_at = now(), acknowledged_by = $2::uuid,
+                             closed_at = coalesce(closed_at, now())
+        where id = $1 and acknowledged_at is null
+        returning id, bus_id, kind::text as kind""", incident_id, user_id)
+    return dict(r) if r else None
+
+
+async def list_incidents(only_open: bool) -> list[dict]:
+    rows = await pool.fetch(f"""
+        select id, bus_id, kind::text as kind, detail, late, opened_at, closed_at, acknowledged_at,
+               st_y(location::geometry) as lat, st_x(location::geometry) as lng
+        from incidents
+        {"where (kind = 'sos' and acknowledged_at is null) or (kind <> 'sos' and closed_at is null)" if only_open else ""}
+        order by opened_at desc limit 200""")
+    return [{**dict(r), **{k: r[k].isoformat() if r[k] else None
+                           for k in ("opened_at", "closed_at", "acknowledged_at")}} for r in rows]
+
+
 async def bus_for_token_hash(token_hash: str) -> int | None:
     return await pool.fetchval("select id from buses where device_token_hash = $1", token_hash)
 
@@ -148,8 +198,12 @@ async def open_trip(bus: dict) -> int:
         "select id from active_trips where bus_id = $1 and end_time is null", bus["id"])
     if existing:
         return existing
-    return await pool.fetchval(
-        "insert into active_trips (bus_id, route_id, departure_scheduled) values ($1, $2, $3::time) returning id",
+    # The last bus of the day on a route is the one with the latest scheduled departure.
+    return await pool.fetchval("""
+        insert into active_trips (bus_id, route_id, departure_scheduled, is_last_bus)
+        values ($1, $2, $3::time,
+                $3::time >= (select max(departure_time) from buses where route_id = $2))
+        returning id""",
         bus["id"], bus["route_id"], datetime.strptime(bus["departure"], "%H:%M").time())
 
 
