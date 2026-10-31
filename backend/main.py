@@ -4,10 +4,14 @@ import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from typing import Literal
+
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
+import auth
+from auth import current_user
 from eta import predict_delay_minutes
 
 SEED = json.loads((Path(__file__).parent / "seed.json").read_text())
@@ -23,6 +27,9 @@ buses = {
     for b in SEED["buses"]
 }
 students: dict[str, dict] = {}
+staff = {s["id"]: {k: v for k, v in s.items() if k != "password"} for s in SEED["demo_staff"]}
+for s in SEED["demo_staff"]:
+    auth.set_password("staff", s["id"], s["password"])
 
 
 def _demo_exam_demand() -> list[dict]:
@@ -38,12 +45,22 @@ def _demo_exam_demand() -> list[dict]:
 exam_demand = _demo_exam_demand()
 
 
-class StudentIn(BaseModel):
-    id: str
-    name: str
+class StopIn(BaseModel):
     route_id: int
     stop: str
-    exam_slot: str | None = None
+    exam_slot: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+
+
+class RegisterIn(StopIn):
+    id: str = Field(min_length=3, max_length=32)
+    name: str = Field(min_length=1, max_length=60)
+    password: str = Field(min_length=6, max_length=128)
+
+
+class LoginIn(BaseModel):
+    kind: Literal["passenger", "staff"]
+    id: str
+    password: str
 
 
 class CountIn(BaseModel):
@@ -160,26 +177,89 @@ def list_buses():
 @app.get("/buses/{bus_id}")
 def get_bus(bus_id: int):
     if bus_id not in buses:
-        raise HTTPException(404, "bus not found")
+        raise HTTPException(404, "Bus not found.")
     return bus_view(buses[bus_id])
 
 
-@app.post("/students")
-async def register_student(s: StudentIn):
-    if s.route_id not in routes or s.stop not in routes[s.route_id]["stops"]:
-        raise HTTPException(400, "unknown route or stop")
-    old = students.get(s.id)
-    if old and old.get("bus_id") in buses:
-        buses[old["bus_id"]]["assigned"] -= 1
-    student = s.model_dump()
+def validate_stop(route_id: int, stop: str):
+    if route_id not in routes or stop not in routes[route_id]["stops"]:
+        raise HTTPException(400, "Unknown route or stop.")
+
+
+async def assign(student: dict) -> dict:
+    if student.get("bus_id") in buses:
+        buses[student.pop("bus_id")]["assigned"] -= 1
     result = allocate(student)
     if result["bus"]:
         student["bus_id"] = result["bus"]["id"]
         buses[student["bus_id"]]["assigned"] += 1
-    students[s.id] = student
+        result["bus"] = bus_view(buses[student["bus_id"]])
     await hub.broadcast({"type": "buses", "data": list_buses()})
-    bus = bus_view(buses[student["bus_id"]]) if "bus_id" in student else None
-    return {"student": student, "bus": bus, "alert": result["alert"]}
+    return result
+
+
+def require_passenger(user: dict = Depends(current_user)) -> dict:
+    if user["role"] != "passenger":
+        raise HTTPException(403, "Passengers only.")
+    return students[user["id"]]
+
+
+def require_bus_staff(bus_id: int, user: dict = Depends(current_user)) -> dict:
+    if user["role"] not in {"driver", "conductor"}:
+        raise HTTPException(403, "Drivers and conductors only.")
+    if user["bus_id"] != bus_id:
+        raise HTTPException(403, f"You are assigned to Bus {user['bus_id']}, not Bus {bus_id}.")
+    return user
+
+
+@app.post("/auth/register")
+async def register(body: RegisterIn):
+    validate_stop(body.route_id, body.stop)
+    if body.id in students:
+        raise HTTPException(409, "This student ID is already registered. Log in instead.")
+    student = {"id": body.id, "name": body.name, "route_id": body.route_id, "stop": body.stop,
+               "exam_slot": body.exam_slot}
+    students[body.id] = student
+    auth.set_password("passenger", body.id, body.password)
+    result = await assign(student)
+    user = {"role": "passenger", "id": body.id, "name": body.name}
+    return {"token": auth.new_session(user), "user": user, **result}
+
+
+@app.post("/auth/login")
+def login(body: LoginIn):
+    if not auth.check_login(body.kind, body.id, body.password):
+        raise HTTPException(401, "Wrong ID or password.")
+    if body.kind == "passenger":
+        user = {"role": "passenger", "id": body.id, "name": students[body.id]["name"]}
+    else:
+        user = dict(staff[body.id])
+    return {"token": auth.new_session(user), "user": user}
+
+
+@app.post("/auth/logout")
+def logout(authorization: str | None = Header(default=None)):
+    auth.end_session(authorization)
+    return {"ok": True}
+
+
+@app.get("/me")
+def me(user: dict = Depends(current_user)):
+    if user["role"] == "passenger":
+        return {**user, "profile": students[user["id"]]}
+    return {**user, "bus": bus_view(buses[user["bus_id"]])}
+
+
+@app.get("/me/bus")
+def my_bus(student: dict = Depends(require_passenger)):
+    return allocate_view(student)
+
+
+@app.put("/me/stop")
+async def change_stop(body: StopIn, student: dict = Depends(require_passenger)):
+    validate_stop(body.route_id, body.stop)
+    student.update(body.model_dump())
+    return await assign(student)
 
 
 def allocate_view(student: dict) -> dict:
@@ -191,14 +271,12 @@ def allocate_view(student: dict) -> dict:
         if result["bus"]:
             result["alert"] = f"Bus {bus_id} has left. Next: Bus {result['bus']['id']}"
         return result
-    return {"bus": bus_view(buses[bus_id]), "alert": None}
-
-
-@app.get("/students/{student_id}/bus")
-def my_bus(student_id: str):
-    if student_id not in students:
-        raise HTTPException(404, "student not registered")
-    return allocate_view(students[student_id])
+    alert = None
+    if seats_free(buses[bus_id]) == 0:
+        spare = next((b for b in candidate_buses(student["route_id"], student["stop"])
+                      if b["id"] != bus_id and seats_free(b) > 0), None)
+        alert = f"Bus {bus_id} is full right now" + (f", take Bus {spare['id']}" if spare else "")
+    return {"bus": bus_view(buses[bus_id]), "alert": alert}
 
 
 @app.post("/buses/{bus_id}/count")
@@ -214,7 +292,7 @@ async def report_count(bus_id: int, body: CountIn):
 
 
 @app.post("/buses/{bus_id}/location")
-async def report_location(bus_id: int, body: LocationIn):
+async def report_location(bus_id: int, body: LocationIn, _: dict = Depends(require_bus_staff)):
     bus = buses.get(bus_id) or _404()
     bus["location"] = body.model_dump()
     touch(bus)
@@ -223,7 +301,7 @@ async def report_location(bus_id: int, body: LocationIn):
 
 
 @app.post("/buses/{bus_id}/status")
-async def report_status(bus_id: int, body: StatusIn):
+async def report_status(bus_id: int, body: StatusIn, _: dict = Depends(require_bus_staff)):
     if body.status not in {"scheduled", "boarding", "departed", "full"}:
         raise HTTPException(400, "status must be scheduled|boarding|departed|full")
     bus = buses.get(bus_id) or _404()
@@ -231,6 +309,14 @@ async def report_status(bus_id: int, body: StatusIn):
     touch(bus)
     await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     return bus_view(bus)
+
+
+@app.get("/buses/{bus_id}/passengers")
+def bus_passengers(bus_id: int, _: dict = Depends(require_bus_staff)):
+    stops = buses[bus_id]["stops"]
+    riders = [{"id": s["id"], "name": s["name"], "stop": s["stop"]} for s in students.values()
+              if s.get("bus_id") == bus_id]
+    return sorted(riders, key=lambda r: (stops.index(r["stop"]), r["name"]))
 
 
 @app.get("/planner")
@@ -275,4 +361,4 @@ async def ws(websocket: WebSocket):
 
 
 def _404():
-    raise HTTPException(404, "bus not found")
+    raise HTTPException(404, "Bus not found.")

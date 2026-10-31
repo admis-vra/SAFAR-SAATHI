@@ -5,6 +5,14 @@
     {"id": 3, "name": "Route 3 - Prem Nagar", "stops": ["A", "B", "C", "D", "E", "F", "G"]},
     {"id": 4, "name": "Route 4 - Rajpur Road", "stops": ["A", "B", "C", "D", "E", "F", "G"]}
   ],
+  "demo_staff_NOTE": "Demo-only accounts for the hackathon. Replace with real staff onboarding before any pilot.",
+  "demo_staff": [
+    {"id": "D14", "name": "Ramesh Negi",  "role": "driver",    "bus_id": 14, "password": "driver14"},
+    {"id": "C14", "name": "Sunil Bisht",  "role": "conductor", "bus_id": 14, "password": "cond14"},
+    {"id": "D15", "name": "Mohan Rawat",  "role": "driver",    "bus_id": 15, "password": "driver15"},
+    {"id": "C15", "name": "Deepak Joshi", "role": "conductor", "bus_id": 15, "password": "cond15"},
+    {"id": "D9",  "name": "Anil Thapa",   "role": "driver",    "bus_id": 9,  "password": "driver9"}
+  ],
   "buses": [
     {"id": 9,  "route_id": 3, "gate": "Gate 1", "stops": ["A", "B", "C"], "capacity": 40, "departure": "13:15"},
     {"id": 14, "route_id": 3, "gate": "Gate 2", "stops": ["D", "E", "F", "G"], "capacity": 40, "departure": "13:15"},
