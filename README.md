@@ -136,6 +136,25 @@ Instead of rushing the bus door, students join a queue for their assigned bus an
   every 5 s and immediately on any change.
 - **Token states:** `waiting → called → boarded | no_show | expired`, or `cancelled` by the student.
 
+### Last-bus fallback
+
+When a route's **last bus** (latest scheduled departure) leaves campus live, every app gets
+`{type: "last_bus_left", route_id, bus_id}`. Students on that route who aren't aboard call `GET /me/fallback`.
+
+- **Geography in PostGIS:** `find_fallback_route(student, current_location)` (blueprint §2.2) starts from where
+  the student is now, else their optional home, else their usual stop. It returns the nearest stops on **other**
+  routes with the buses that serve them (`fallback_candidates`). Only the backend can call it; Supabase's public
+  API is refused.
+- **Live filtering in the backend:** drops buses that have already left today, have no free seat (fused count),
+  or are more than **2 km** away on foot. Returns the 3 nearest, each with walking distance and time, gate,
+  departure and seats.
+- **No option?** The answer says so and points to the transport office. It never invents a route.
+  With today's timetable (all buses within 13:10–13:20) and sample stops, "no option" is common. Staggered
+  departures and real stop coordinates would make this feature much more useful.
+- **Privacy:** current location is used for one answer and never stored. Home is optional, rounded to ~100 m,
+  and deletable (`PUT/DELETE /me/home`).
+- Replayed (late) data never raises the last-bus alert.
+
 ### Website (passenger + driver/conductor)
 
 ```bash
@@ -205,6 +224,8 @@ Base URL: `http://<host>:8000`. All JSON. 🔒 = needs `Authorization: Bearer <S
 | GET | `/me/queue` 🔒 | passenger | `{queue: {state: not_open\|open\|closed, opens_at, departs_at}, token: {position, ahead, status, likely_seat}}` |
 | POST | `/me/queue` 🔒 | passenger | join your bus's queue (409 if not open, already left, or already queued) |
 | DELETE | `/me/queue` 🔒 | passenger | cancel your token |
+| GET | `/me/fallback?lat=&lng=` 🔒 | passenger | `{needed, last_bus, options: [{route, stop, walk_m, walk_min, bus_id, gate, departs, seats_free}], message}` (lat/lng optional, not stored) |
+| PUT / DELETE | `/me/home` 🔒 | passenger | set `{lat, lng}` (rounded ~100 m) / remove your home location |
 | GET | `/buses/{id}/queue` 🔒 | staff of that bus, dispatcher | queue columns: waiting / called / boarded / no_show / expired / cancelled |
 | POST | `/buses/{id}/queue/{token}/boarded\|no_show` 🔒 | driver/conductor **of that bus** | close a called token |
 | GET | `/buses/{id}/passengers` 🔒 | driver/conductor **of that bus** | students booked on the bus, in stop order |
@@ -212,7 +233,7 @@ Base URL: `http://<host>:8000`. All JSON. 🔒 = needs `Authorization: Bearer <S
 | POST | `/ingest/backlog` | bus device (`X-Device-Token`) | array of payloads (≤2000), stored as history |
 | GET | `/planner?slot=11:00` | dashboard | students per route for an exam slot + extra-trip suggestions (≥30 students) |
 | GET | `/dashboard/summary` | dashboard | buses, totals, half-empty and full bus ids |
-| WS | `/ws` | student app, dashboard | pushes `{type:"buses",data:[...]}`, `{type:"bus",data:BusView}`, `{type:"alert",bus_id,message}`, `{type:"incident",id,bus_id,kind,open,late?,location?}`, `{type:"trip_event",bus_id,kind,stop,ts}`, `{type:"queue",bus_id}` (refetch), `{type:"token_called",bus_id,token_id,position,board_within_s}` |
+| WS | `/ws` | student app, dashboard | pushes `{type:"buses",data:[...]}`, `{type:"bus",data:BusView}`, `{type:"alert",bus_id,message}`, `{type:"incident",id,bus_id,kind,open,late?,location?}`, `{type:"trip_event",bus_id,kind,stop,ts}`, `{type:"queue",bus_id}` (refetch), `{type:"token_called",bus_id,token_id,position,board_within_s}`, `{type:"last_bus_left",route_id,bus_id}` |
 
 `BusView`:
 

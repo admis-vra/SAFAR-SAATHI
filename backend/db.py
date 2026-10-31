@@ -341,3 +341,26 @@ async def queue_board(bus_id: int, day: date) -> list[dict]:
         where t.bus_id = $1 and t.service_date = $2 order by t.queue_position""", bus_id, day)
     return [{**dict(r), "created_at": r["created_at"].isoformat(),
              "called_at": r["called_at"].isoformat() if r["called_at"] else None} for r in rows]
+
+
+# ---------- last-bus fallback ----------
+
+def _point(lat: float | None, lng: float | None) -> str | None:
+    return None if lat is None or lng is None else f"SRID=4326;POINT({lng} {lat})"
+
+
+async def find_fallback_route(student_id: str, lat: float | None, lng: float | None) -> list[dict]:
+    rows = await pool.fetch("select * from find_fallback_route($1::uuid, $2::text::geography)",
+                            student_id, _point(lat, lng))
+    return [dict(r) for r in rows]
+
+
+async def fallback_candidates(exclude_route: int, lat: float, lng: float) -> list[dict]:
+    rows = await pool.fetch("select * from fallback_candidates($1, $2::text::geography)",
+                            exclude_route, _point(lat, lng))
+    return [dict(r) for r in rows]
+
+
+async def set_home(student_id: str, lat: float | None, lng: float | None):
+    await pool.execute("update profiles set home_location = $2::text::geography, updated_at = now() "
+                       "where id = $1::uuid", student_id, _point(lat, lng))

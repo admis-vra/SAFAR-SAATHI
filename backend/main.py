@@ -27,6 +27,8 @@ OFFLINE_AFTER_S = 30
 OFFLINE_CHECK_EVERY_S = 5
 LATE_AFTER_S = 120  # data older than this updates history but never sends live alerts
 QUEUE_CHECK_EVERY_S = 5
+MAX_WALK_M = 2000       # farther than this isn't a fallback, it's a different trip
+FALLBACK_OPTIONS = 3
 
 routes: dict[int, dict] = {}
 stop_ids: dict[tuple[int, str], int] = {}
@@ -322,12 +324,19 @@ async def maybe_recalibrate(bus: dict):
             detail=f"IR said {f.expected_empty} empty, camera {f.visual_empty}; IR offset {before} -> {new_offset}")
 
 
-async def start_trip(bus: dict):
+def is_last_bus(bus: dict) -> bool:
+    return bus["departure"] == max(b["departure"] for b in buses.values() if b["route_id"] == bus["route_id"])
+
+
+async def start_trip(bus: dict, notify: bool = True):
     bus["trip_id"] = await db.open_trip(bus)
     bus["status"] = "departed"
     bus["last_trip_start"] = queueing.now_ist().astimezone(timezone.utc)  # same clock as the queue window
     if await db.close_queue(bus["id"], queueing.service_day(queueing.now_ist())):
         await hub.broadcast({"type": "queue", "bus_id": bus["id"]})
+    if notify and is_last_bus(bus):
+        # Students on this route who aren't aboard can now ask /me/fallback for another way home.
+        await hub.broadcast({"type": "last_bus_left", "route_id": bus["route_id"], "bus_id": bus["id"]})
 
 
 async def end_trip(bus: dict):
@@ -352,7 +361,7 @@ async def run_geofence(bus: dict, readings: list[ingest.Telemetry]) -> bool:
         for action, zone in bus["fence"].update(r.gps.lat, r.gps.lon):
             kind = f"{zone.kind}_{action}"
             if kind == "depot_exit" and not bus.get("trip_id"):
-                await start_trip(bus)
+                await start_trip(bus, notify=not late)
                 changed = True
             await db.insert_trip_event(bus["id"], bus.get("trip_id"), kind, r.ts, zone.stop_id, late)
             ends_trip = kind == "depot_enter" or (kind == "stop_enter" and zone.terminal)
@@ -732,6 +741,72 @@ async def acknowledge(incident_id: int, user: dict = Depends(require_dispatcher)
     if bus:
         await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     return {"acknowledged": incident_id}
+
+
+# ---------- last-bus fallback ----------
+
+class HomeIn(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+
+
+def bus_has_left(bus: dict) -> bool:
+    return bus["status"] == "departed" or queueing.window(
+        bus["departure"], queueing.now_ist(), bus.get("last_trip_start")).state == "closed"
+
+
+def last_bus_of(route_id: int) -> dict:
+    return max((b for b in buses.values() if b["route_id"] == route_id), key=lambda b: b["departure"])
+
+
+def fallback_options(candidates: list[dict]) -> list[dict]:
+    """Nearest-first candidates -> buses that haven't left, have a free seat and are within walking distance."""
+    options, seen = [], set()
+    for c in candidates:
+        bus = buses.get(c["bus_id"])
+        if bus is None or c["bus_id"] in seen or c["walk_m"] > MAX_WALK_M:
+            continue
+        if bus_has_left(bus) or seats_free(bus) <= 0:
+            continue
+        seen.add(c["bus_id"])
+        options.append({"route_id": c["route_id"], "route": c["route_name"], "stop": c["stop_name"],
+                        "walk_m": round(c["walk_m"]), "walk_min": math.ceil(c["walk_m"] / 75),  # ~4.5 km/h
+                        "bus_id": bus["id"], "gate": bus["gate"], "departs": eta(bus)["predicted"],
+                        "seats_free": seats_free(bus)})
+        if len(options) == FALLBACK_OPTIONS:
+            break
+    return options
+
+
+@app.get("/me/fallback")
+async def my_fallback(lat: float | None = None, lng: float | None = None,
+                      student: dict = Depends(require_passenger)):
+    """If the last bus on your route has left: up to 3 buses on other routes you can still walk to.
+    lat/lng (optional) is where you are now; it is used for this answer only and not stored."""
+    last = last_bus_of(student["route_id"])
+    if not bus_has_left(last):
+        return {"needed": False, "last_bus": {"bus_id": last["id"], "departs": eta(last)["predicted"]}}
+    options = fallback_options(await db.find_fallback_route(student["id"], lat, lng))
+    return {
+        "needed": True,
+        "last_bus": {"bus_id": last["id"], "left": True},
+        "options": options,
+        "message": None if options else
+        "No other bus within walking distance has seats right now. Please contact the transport office.",
+    }
+
+
+@app.put("/me/home")
+async def set_my_home(body: HomeIn, student: dict = Depends(require_passenger)):
+    # Coarse on purpose (~100 m): enough to find a nearby stop, not an exact address.
+    await db.set_home(student["id"], round(body.lat, 3), round(body.lng, 3))
+    return {"home": {"lat": round(body.lat, 3), "lng": round(body.lng, 3)}}
+
+
+@app.delete("/me/home")
+async def clear_my_home(student: dict = Depends(require_passenger)):
+    await db.set_home(student["id"], None, None)
+    return {"home": None}
 
 
 @app.get("/buses/{bus_id}/passengers")
