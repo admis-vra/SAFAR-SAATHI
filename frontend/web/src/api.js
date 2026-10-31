@@ -1,7 +1,7 @@
 import { roleOf, supabase } from './supabase'
 
 export function homeFor(session) {
-  return roleOf(session) === 'passenger' ? '/passenger' : '/staff'
+  return { passenger: '/passenger', dispatcher: '/office' }[roleOf(session)] ?? '/staff'
 }
 
 export class ApiError extends Error {

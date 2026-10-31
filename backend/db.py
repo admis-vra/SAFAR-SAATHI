@@ -206,11 +206,13 @@ async def open_trip(bus: dict) -> int:
         "select id from active_trips where bus_id = $1 and end_time is null", bus["id"])
     if existing:
         return existing
-    # The last bus of the day on a route is the one with the latest scheduled departure.
+    # Last bus = no later bus on the same route serves any of the stops this one serves.
     return await pool.fetchval("""
         insert into active_trips (bus_id, route_id, departure_scheduled, is_last_bus)
         values ($1, $2, $3::time,
-                $3::time >= (select max(departure_time) from buses where route_id = $2))
+                exists (select 1 from unnest((select serves_stops from buses where id = $1)) as s(stop)
+                        where $3::time >= (select max(o.departure_time) from buses o
+                                           where o.route_id = $2 and s.stop = any (o.serves_stops))))
         returning id""",
         bus["id"], bus["route_id"], datetime.strptime(bus["departure"], "%H:%M").time())
 

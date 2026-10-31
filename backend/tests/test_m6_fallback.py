@@ -74,13 +74,13 @@ def test_options_skip_full_departed_far_and_duplicate_buses(client_factory):
 
 # ---------- last-bus trigger ----------
 
-def test_only_the_routes_last_bus_triggers_the_alert(client_factory, recorder):
+def test_only_a_stops_last_bus_triggers_the_alert(client_factory, recorder):
     with client_factory() as c:
-        c.post("/buses/14/status", json={"status": "departed"}, headers=staff(14))   # 13:15, not last
+        c.post("/buses/14/status", json={"status": "departed"}, headers=staff(14))   # D-G 13:15: 15 comes later
         assert not [m for m in recorder if m["type"] == "last_bus_left"]
-        c.post("/buses/15/status", json={"status": "departed"}, headers=staff(15))   # 13:20, last on route 3
-    assert [m for m in recorder if m["type"] == "last_bus_left"] == [{"type": "last_bus_left", "route_id": 3,
-                                                                       "bus_id": 15}]
+        c.post("/buses/15/status", json={"status": "departed"}, headers=staff(15))   # D-G 13:20: last for D-G
+        c.post("/buses/9/status", json={"status": "departed"}, headers=staff(9))     # A-C 13:15: only bus for A-C
+    assert [m["bus_id"] for m in recorder if m["type"] == "last_bus_left"] == [15, 9]
 
 
 @pytest.fixture
@@ -116,11 +116,22 @@ def test_live_last_bus_departure_alerts(client_factory, recorder, bus11_device):
 
 # ---------- student endpoint ----------
 
-def make_route3_student(make_students):
+def make_route3_student(make_students, stop="E"):
     sid = make_students(1)[0]
     execute("update profiles set default_route_id = 3, default_stop_id = (select id from stops where route_id = 3 "
-            "and stop_name = 'B') where id = $1::uuid", sid)
+            "and stop_name = $2) where id = $1::uuid", sid, stop)
     return sid, {"Authorization": "Bearer " + token(sid)}
+
+
+@needs_students
+def test_a_later_bus_for_other_stops_does_not_strand_you(client_factory, make_students, clock):
+    _, me = make_route3_student(make_students, stop="B")   # stop B is served only by Bus 9
+    with client_factory() as c:
+        c.post("/buses/15/status", json={"status": "departed"}, headers=staff(15))
+        assert c.get("/me/fallback", headers=me).json() == {"needed": False, "last_bus": {
+            "bus_id": 9, "departs": c.get("/buses/9").json()["eta"]["predicted"]}}
+        c.post("/buses/9/status", json={"status": "departed"}, headers=staff(9))
+        assert c.get("/me/fallback", headers=me).json()["needed"] is True
 
 
 @needs_students

@@ -1,19 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, logout } from '../api'
-import { useLiveBuses } from '../live'
+import { useLiveBuses, useRoutes } from '../live'
 import BusMap from '../components/BusMap'
 import { DEMO_PATH } from '../geo'
 import { Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
 
 const GPS_SEND_MS = 5000
 const SIM_STEP_MS = 3000
+const SOS_HOLD_MS = 2000
 
 export default function Staff() {
   const [me, setMe] = useState(null)
   const [riders, setRiders] = useState([])
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [queueTick, setQueueTick] = useState(0)
   const reloadTimer = useRef(null)
+  const routes = useRoutes()
 
   const fail = useCallback((err) => {
     if (err.status === 401) logout()
@@ -27,6 +30,7 @@ export default function Staff() {
 
   const { buses, connected } = useLiveBuses((msg) => {
     if (msg.type === 'alert' && msg.bus_id === busId) setNotice(msg.message)
+    if ((msg.type === 'queue' || msg.type === 'token_called') && msg.bus_id === busId) setQueueTick((t) => t + 1)
     clearTimeout(reloadTimer.current)
     reloadTimer.current = setTimeout(loadRiders, 400)
   })
@@ -82,34 +86,39 @@ export default function Staff() {
           </div>
         </section>
 
-        <section className="card">
-          <div className="eyebrow">Trip controls</div>
+        <TripState bus={bus} />
+
+        {(bus.status === 'scheduled' || bus.status === 'boarding') && (
+          <section className="card">
+            <BigButton tone="good" active={bus.status === 'boarding'} onClick={() => setStatus('boarding')}
+              en={bus.status === 'boarding' ? 'Boarding open · calling the queue' : 'Open boarding'}
+              hi="बोर्डिंग खोलें" />
+          </section>
+        )}
+
+        <SosButton bus={bus} onError={fail} />
+
+        <StaffQueue busId={bus.id} tick={queueTick} onError={fail} />
+
+        <details className="card override">
+          <summary className="eyebrow">Manual override · <span lang="hi">मैनुअल</span></summary>
+          <p className="tiny muted">Trips start and end on their own from GPS. Use these only if that fails.</p>
           <div className="big-buttons">
-            {isDriver ? (
-              <>
-                <BigButton tone="good" active={bus.status === 'boarding'} onClick={() => setStatus('boarding')}
-                  en="Start boarding" hi="बोर्डिंग शुरू" />
-                <BigButton tone="info" active={bus.status === 'departed'} onClick={() => setStatus('departed')}
-                  en="Start trip" hi="यात्रा शुरू करें" />
-              </>
-            ) : (
-              <>
-                <BigButton tone="good" active={bus.status === 'boarding'} onClick={() => setStatus('boarding')}
-                  en="Open boarding" hi="बोर्डिंग खोलें" />
-                <BigButton tone="bad" active={bus.status === 'full'} onClick={() => setStatus('full')}
-                  en="Bus full" hi="बस भर गई" />
-              </>
-            )}
+            <BigButton tone="info" active={bus.status === 'departed'} onClick={() => setStatus('departed')}
+              en="Start trip" hi="यात्रा शुरू करें" />
+            <BigButton tone="bad" active={bus.status === 'full'} onClick={() => setStatus('full')}
+              en="Bus full" hi="बस भर गई" />
             <BigButton tone="neutral" active={bus.status === 'scheduled'} onClick={() => setStatus('scheduled')}
               en="Reset" hi="रीसेट" />
           </div>
-        </section>
+        </details>
 
         {isDriver ? <GpsShare busId={bus.id} onError={fail} /> : <ManualCount bus={bus} onError={fail} />}
 
         <section className="card">
           <div className="eyebrow">Live map</div>
-          <BusMap buses={Object.values(buses)} focusId={bus.id} height={220} />
+          <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={bus.route_id} focusId={bus.id}
+            height={220} />
         </section>
 
         <section className="card">
@@ -128,6 +137,135 @@ export default function Staff() {
         </section>
       </main>
     </div>
+  )
+}
+
+function TripState({ bus }) {
+  const t = bus.trip ?? {}
+  const [en, hi, tone] = t.in_depot ? ['At campus', 'कैंपस में', 'neutral']
+    : t.at_stop ? [`At stop ${t.at_stop}`, `स्टॉप ${t.at_stop} पर`, 'good']
+      : bus.status === 'departed' ? ['On the road', 'रास्ते में', 'info']
+        : ['Waiting for GPS', 'जीपीएस का इंतज़ार', 'neutral']
+  return (
+    <section className={`card trip-state ${tone}`}>
+      <div className="eyebrow">Trip · automatic</div>
+      <div className="trip-state-main">{en} <span className="muted" lang="hi">· {hi}</span></div>
+      <div className="tiny muted">
+        {t.id ? `Trip ${t.id} started automatically when the bus left campus.` :
+          'The trip starts by itself when the bus leaves campus. Nothing to press.'}
+        {bus.device?.online === false && ' · Bus device offline'}
+      </div>
+    </section>
+  )
+}
+
+function SosButton({ bus, onError }) {
+  const [progress, setProgress] = useState(0)
+  const [sending, setSending] = useState(false)
+  const timer = useRef(null)
+
+  const stop = () => {
+    cancelAnimationFrame(timer.current)
+    setProgress(0)
+  }
+
+  // Hold for 2 s so a pocket tap or a bump on a bumpy road can't raise a false alarm.
+  const start = (e) => {
+    e.preventDefault()
+    if (sending || bus.sos) return
+    const t0 = performance.now()
+    const tick = async (now) => {
+      const p = Math.min((now - t0) / SOS_HOLD_MS, 1)
+      setProgress(p)
+      if (p < 1) {
+        timer.current = requestAnimationFrame(tick)
+        return
+      }
+      setSending(true)
+      try {
+        await api(`/buses/${bus.id}/sos`, { method: 'POST' })
+      } catch (err) {
+        onError(err)
+      } finally {
+        setSending(false)
+        setProgress(0)
+      }
+    }
+    timer.current = requestAnimationFrame(tick)
+  }
+
+  useEffect(() => () => cancelAnimationFrame(timer.current), [])
+
+  if (bus.sos) {
+    return (
+      <section className="card sos-sent" role="status">
+        <div className="sos-sent-title">SOS sent · <span lang="hi">मदद भेजी गई</span></div>
+        <div className="small-text">The control room has your location and will call you. Stay with the bus.</div>
+      </section>
+    )
+  }
+  return (
+    <button className="sos-btn" onPointerDown={start} onPointerUp={stop} onPointerLeave={stop} onPointerCancel={stop}
+      onContextMenu={(e) => e.preventDefault()} disabled={sending} aria-label="Hold for 2 seconds to send SOS">
+      <span className="sos-fill" style={{ transform: `scaleX(${progress})` }} />
+      <span className="sos-label">{sending ? 'Sending…' : 'SOS'}</span>
+      <span className="sos-hint">Hold 2 seconds · <span lang="hi">2 सेकंड दबाए रखें</span></span>
+    </button>
+  )
+}
+
+function StaffQueue({ busId, tick, onError }) {
+  const [data, setData] = useState(null)
+  const [busy, setBusy] = useState(null)
+  useEffect(() => {
+    api(`/buses/${busId}/queue`).then(setData).catch(onError)
+  }, [busId, tick, onError])
+
+  const mark = async (id, outcome) => {
+    setBusy(id)
+    try {
+      await api(`/buses/${busId}/queue/${id}/${outcome}`, { method: 'POST' })
+      setData(await api(`/buses/${busId}/queue`))
+    } catch (err) {
+      onError(err)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (!data) return null
+  const { called, waiting, boarded } = data.columns
+  return (
+    <section className="card">
+      <div className="row-between">
+        <div className="eyebrow">Queue · <span lang="hi">कतार</span></div>
+        <span className="tiny muted">{waiting.length} waiting · {boarded.length} boarded · {data.queue.state}</span>
+      </div>
+      {called.length === 0 ? (
+        <p className="muted small-text">
+          {data.queue.state !== 'open' ?
+            `Queue ${data.queue.state === 'not_open' ? `opens at ${data.queue.opens_at}` : 'closed'}.` :
+            data.queue.bus_status !== 'boarding' ? 'Nobody called yet. Open boarding to call the queue.' :
+              waiting.length ? 'No free seat to call the next student yet.' : 'Nobody waiting.'}
+        </p>
+      ) : (
+        <ul className="called-list">
+          {called.map((t) => (
+            <li key={t.id}>
+              <span><b>#{t.position}</b> {t.name} <span className="tiny muted">{t.student_id}</span></span>
+              <span className="row gap-s">
+                <button className="btn primary small" disabled={busy === t.id} onClick={() => mark(t.id, 'boarded')}>
+                  Boarded
+                </button>
+                <button className="btn ghost small" disabled={busy === t.id} onClick={() => mark(t.id, 'no_show')}>
+                  No-show
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 

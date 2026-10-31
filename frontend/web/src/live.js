@@ -1,4 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
+import { api } from './api'
+
+export function useRoutes() {
+  const [routes, setRoutes] = useState([])
+  useEffect(() => {
+    api('/routes').then(setRoutes).catch(() => {})
+  }, [])
+  return routes
+}
 
 export function useLiveBuses(onEvent) {
   const [buses, setBuses] = useState({})

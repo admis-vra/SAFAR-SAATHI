@@ -25,6 +25,9 @@ if TEST_DSN:
     os.environ["DATABASE_URL"] = TEST_DSN
     os.environ["SUPABASE_URL"] = SUPABASE_URL
     os.environ["SUPABASE_JWT_SECRET"] = JWT_SECRET
+    # Don't listen to the real broker from backend/.env (a running simulator would leak into tests);
+    # the MQTT test sets its own. Empty (not unset) so load_dotenv won't fill it back in.
+    os.environ["MQTT_URL"] = ""
 
 collect_ignore_glob = [] if TEST_DSN else ["test_*.py"]
 
@@ -84,12 +87,17 @@ def restore_bus_state():
     saved = fetch("select bus_id, status::text as status, st_astext(location) as wkt, speed_kmh, people_count, "
                   "cam_seats_free, cam_seats_total, ir_net, last_device_ts from bus_live_state")
     open_trips = [r["id"] for r in fetch("select id from active_trips where end_time is null")]
-    open_incidents = [r["id"] for r in fetch("select id from incidents where closed_at is null")]
+    open_incidents = [r["id"] for r in fetch("select id from incidents where closed_at is null "
+                                              "or (kind = 'sos' and acknowledged_at is null)")]
     yield
     execute("update active_trips set end_time = now() where end_time is null and not (id = any($1::bigint[]))",
             open_trips)
-    execute("update incidents set closed_at = now() where closed_at is null and not (id = any($1::bigint[]))",
-            open_incidents)
+    # An SOS only stops showing in the control room once acknowledged, so test SOSes get acknowledged too.
+    execute("update incidents set closed_at = coalesce(closed_at, now()), "
+            "acknowledged_at = case when kind = 'sos' then coalesce(acknowledged_at, now()) else acknowledged_at end, "
+            "detail = detail || ' [test]' "
+            "where (closed_at is null or (kind = 'sos' and acknowledged_at is null)) "
+            "and not (id = any($1::bigint[]))", open_incidents)
     for r in saved:
         execute("""update bus_live_state set status=$2::bus_status,
                    location=case when $3::text is null then null else st_geogfromtext($3::text) end,

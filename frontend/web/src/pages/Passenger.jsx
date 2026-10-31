@@ -3,6 +3,8 @@ import { api, logout } from '../api'
 import { supabase } from '../supabase'
 import { useLiveBuses } from '../live'
 import BusMap from '../components/BusMap'
+import FallbackModal from '../components/FallbackModal'
+import QueueCard from '../components/QueueCard'
 import { Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
 
 const EXAM_SLOTS = ['09:00', '11:00', '14:00']
@@ -29,6 +31,8 @@ export default function Passenger() {
   const [examTrip, setExamTrip] = useState(null)
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState('')
+  const [queueTick, setQueueTick] = useState(0)
+  const [fallbackCheck, setFallbackCheck] = useState(0)  // >0: (re)check whether the last bus has left
   const refreshTimer = useRef(null)
 
   const handleError = useCallback((err) => {
@@ -41,8 +45,10 @@ export default function Passenger() {
     api('/me/bus').then((d) => { setMine(d); setError('') }).catch(handleError)
   }, [handleError])
 
-  const { buses, connected } = useLiveBuses(() => {
+  const { buses, connected } = useLiveBuses((msg) => {
     if (needsProfile) return
+    if (msg.type === 'queue' || msg.type === 'token_called') setQueueTick((t) => t + 1)
+    if (msg.type === 'last_bus_left' && msg.route_id === profile?.route_id) setFallbackCheck((n) => n + 1)
     clearTimeout(refreshTimer.current)
     refreshTimer.current = setTimeout(loadBus, 300)
   })
@@ -54,6 +60,7 @@ export default function Passenger() {
         if (d.profile) {
           setProfile(d.profile)
           loadBus()
+          setFallbackCheck(1)  // opening the app after the last bus left should show options too
         } else {
           setNeedsProfile(true)
         }
@@ -138,6 +145,12 @@ export default function Passenger() {
           </section>
         )}
 
+        {fallbackCheck > 0 && (
+          <FallbackModal key={fallbackCheck} onClose={() => setFallbackCheck(0)} onError={handleError} />
+        )}
+
+        {bus && <QueueCard key={bus.id} tick={queueTick} onError={handleError} />}
+
         {examTrip && profile?.exam_slot && (
           <section className="card exam-card">
             <div className="eyebrow">Exam day</div>
@@ -149,7 +162,7 @@ export default function Passenger() {
 
         <section className="card">
           <div className="eyebrow">Live map</div>
-          <BusMap buses={Object.values(buses)} focusId={bus?.id} />
+          <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={profile?.route_id} focusId={bus?.id} />
         </section>
 
         <section className="card">

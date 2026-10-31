@@ -38,6 +38,8 @@ export function SeatMeter({ bus }) {
   const pctFree = Math.round((free / bus.capacity) * 100)
   const tone = free === 0 ? 'bad' : pctFree < 25 ? 'warn' : 'good'
   const source = {
+    fused: 'Door counter + camera',
+    ir_count: 'Door counter',
     camera: 'Seat camera',
     camera_partial: `Seat camera (sees ${bus.seats_seen} of ${bus.capacity} seats)`,
     people_count: 'Head count',

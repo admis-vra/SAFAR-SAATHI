@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { homeFor } from './api'
 import { roleOf, supabase, supabaseConfigured } from './supabase'
 import Login from './pages/Login'
+import Office from './pages/Office'
 import Passenger from './pages/Passenger'
 import Staff from './pages/Staff'
 
@@ -31,6 +32,7 @@ function Routed() {
       <Route path="/" element={session ? <Navigate to={homeFor(session)} replace /> : <Login />} />
       <Route path="/passenger" element={guard(['passenger'], <Passenger />)} />
       <Route path="/staff" element={guard(['driver', 'conductor'], <Staff />)} />
+      <Route path="/office" element={guard(['dispatcher'], <Office />)} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

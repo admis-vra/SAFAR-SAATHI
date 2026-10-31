@@ -325,7 +325,8 @@ async def maybe_recalibrate(bus: dict):
 
 
 def is_last_bus(bus: dict) -> bool:
-    return bus["departure"] == max(b["departure"] for b in buses.values() if b["route_id"] == bus["route_id"])
+    """Last bus for at least one of the stops it serves (a route can split its stops across buses)."""
+    return any(last_bus_of(bus["route_id"], stop)["id"] == bus["id"] for stop in bus["stops"])
 
 
 async def start_trip(bus: dict, notify: bool = True):
@@ -755,8 +756,10 @@ def bus_has_left(bus: dict) -> bool:
         bus["departure"], queueing.now_ist(), bus.get("last_trip_start")).state == "closed"
 
 
-def last_bus_of(route_id: int) -> dict:
-    return max((b for b in buses.values() if b["route_id"] == route_id), key=lambda b: b["departure"])
+def last_bus_of(route_id: int, stop: str) -> dict:
+    """The latest bus on this route that actually serves this stop."""
+    return max((b for b in buses.values() if b["route_id"] == route_id and stop in b["stops"]),
+               key=lambda b: (b["departure"], b["id"]))
 
 
 def fallback_options(candidates: list[dict]) -> list[dict]:
@@ -783,7 +786,7 @@ async def my_fallback(lat: float | None = None, lng: float | None = None,
                       student: dict = Depends(require_passenger)):
     """If the last bus on your route has left: up to 3 buses on other routes you can still walk to.
     lat/lng (optional) is where you are now; it is used for this answer only and not stored."""
-    last = last_bus_of(student["route_id"])
+    last = last_bus_of(student["route_id"], student["stop"])
     if not bus_has_left(last):
         return {"needed": False, "last_bus": {"bus_id": last["id"], "departs": eta(last)["predicted"]}}
     options = fallback_options(await db.find_fallback_route(student["id"], lat, lng))
