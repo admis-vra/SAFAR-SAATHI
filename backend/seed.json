@@ -1,0 +1,17 @@
+{
+  "routes": [
+    {"id": 1, "name": "Route 1 - Clock Tower", "stops": ["A", "B", "C", "D", "E", "F", "G"]},
+    {"id": 2, "name": "Route 2 - ISBT", "stops": ["A", "B", "C", "D", "E", "F", "G"]},
+    {"id": 3, "name": "Route 3 - Prem Nagar", "stops": ["A", "B", "C", "D", "E", "F", "G"]},
+    {"id": 4, "name": "Route 4 - Rajpur Road", "stops": ["A", "B", "C", "D", "E", "F", "G"]}
+  ],
+  "buses": [
+    {"id": 9,  "route_id": 3, "gate": "Gate 1", "stops": ["A", "B", "C"], "capacity": 40, "departure": "13:15"},
+    {"id": 14, "route_id": 3, "gate": "Gate 2", "stops": ["D", "E", "F", "G"], "capacity": 40, "departure": "13:15"},
+    {"id": 15, "route_id": 3, "gate": "Gate 2", "stops": ["D", "E", "F", "G"], "capacity": 40, "departure": "13:20"},
+    {"id": 3,  "route_id": 1, "gate": "Gate 1", "stops": ["A", "B", "C", "D", "E", "F", "G"], "capacity": 40, "departure": "13:10"},
+    {"id": 5,  "route_id": 2, "gate": "Gate 1", "stops": ["A", "B", "C"], "capacity": 40, "departure": "13:10"},
+    {"id": 6,  "route_id": 2, "gate": "Gate 1", "stops": ["D", "E", "F", "G"], "capacity": 40, "departure": "13:15"},
+    {"id": 11, "route_id": 4, "gate": "Gate 2", "stops": ["A", "B", "C", "D", "E", "F", "G"], "capacity": 40, "departure": "13:20"}
+  ]
+}

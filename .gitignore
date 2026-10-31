@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+node_modules/
+dist/
+*.pt
+ml/artifacts/
+ml/trips_synthetic.csv
+vision/*.mp4
+.env
