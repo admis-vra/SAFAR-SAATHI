@@ -49,7 +49,7 @@ Base URL: `http://<host>:8000`. All JSON.
 | GET | `/students/{id}/bus` | student app | `{bus, alert}` — re-allocates if their bus left |
 | GET | `/buses` | everyone | all buses (`BusView`) |
 | GET | `/buses/{id}` | everyone | one `BusView` |
-| POST | `/buses/{id}/count` | vision | `{count}` |
+| POST | `/buses/{id}/count` | vision | `{count, seats_free?, seats_total?}` — seat fields optional, sent together |
 | POST | `/buses/{id}/location` | driver app | `{lat, lng}` (send every ~10 s) |
 | POST | `/buses/{id}/status` | driver app | `{status: scheduled\|boarding\|departed\|full}` |
 | GET | `/planner?slot=11:00` | dashboard | students per route for an exam slot + extra-trip suggestions (≥30 students) |
@@ -60,12 +60,22 @@ Base URL: `http://<host>:8000`. All JSON.
 
 ```json
 {"id": 14, "route_id": 3, "gate": "Gate 2", "stops": ["D","E","F","G"], "capacity": 40,
- "occupancy": 28, "seats_free": 12, "status": "boarding", "location": {"lat": 30.27, "lng": 78.0},
+ "occupancy": 28, "seats_free": 12, "seat_source": "camera", "seats_seen": 40,
+ "status": "boarding", "location": {"lat": 30.27, "lng": 78.0},
  "eta": {"scheduled": "13:15", "predicted": "13:18", "delay_min": 3.2, "source": "model|baseline|timetable"},
  "updated_at": "2026-10-31T13:02:11"}
 ```
 
-Occupancy = latest camera count if the bus has a camera, otherwise students allocated to it.
+Occupancy = people counted by the camera if the bus has one, otherwise students allocated to it.
+
+`seats_free` comes from the best source available, named in `seat_source`:
+
+| `seat_source` | Meaning |
+|---|---|
+| `camera` | Seat map covers the whole bus; empty seats detected directly |
+| `camera_partial` | Seat map covers `seats_seen` of `capacity` seats; unseen seats assumed to fill at the same rate (an estimate — show "~" in the UI) |
+| `people_count` | No seat map; `capacity − people counted` |
+| `allocations` | No camera; `capacity − students allocated` |
 
 ## Demo script (what judges should see)
 

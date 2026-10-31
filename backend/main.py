@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from eta import predict_delay_minutes
 
@@ -18,7 +18,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 routes = {r["id"]: r for r in SEED["routes"]}
 buses = {
-    b["id"]: {**b, "count": None, "assigned": 0, "status": "scheduled", "location": None, "updated_at": None}
+    b["id"]: {**b, "count": None, "seat_cam": None, "assigned": 0, "status": "scheduled", "location": None,
+              "updated_at": None}
     for b in SEED["buses"]
 }
 students: dict[str, dict] = {}
@@ -46,7 +47,17 @@ class StudentIn(BaseModel):
 
 
 class CountIn(BaseModel):
-    count: int
+    count: int = Field(ge=0)
+    seats_free: int | None = Field(default=None, ge=0)
+    seats_total: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _seats_together(self):
+        if (self.seats_free is None) != (self.seats_total is None):
+            raise ValueError("send seats_free and seats_total together")
+        if self.seats_free is not None and self.seats_free > self.seats_total:
+            raise ValueError("seats_free cannot exceed seats_total")
+        return self
 
 
 class LocationIn(BaseModel):
@@ -80,7 +91,20 @@ def occupancy(bus: dict) -> int:
     return bus["count"] if bus["count"] is not None else bus["assigned"]
 
 
+def seat_source(bus: dict) -> str:
+    cam = bus["seat_cam"]
+    if cam:
+        return "camera" if cam["total"] >= bus["capacity"] else "camera_partial"
+    return "people_count" if bus["count"] is not None else "allocations"
+
+
 def seats_free(bus: dict) -> int:
+    cam = bus["seat_cam"]
+    if cam:
+        if cam["total"] >= bus["capacity"]:
+            return min(cam["free"], bus["capacity"])
+        # Camera sees only part of the bus: assume unseen seats fill at the same rate as seen ones.
+        return round(cam["free"] * bus["capacity"] / cam["total"])
     return max(bus["capacity"] - occupancy(bus), 0)
 
 
@@ -97,6 +121,7 @@ def bus_view(bus: dict) -> dict:
     return {
         "id": bus["id"], "route_id": bus["route_id"], "gate": bus["gate"], "stops": bus["stops"],
         "capacity": bus["capacity"], "occupancy": occupancy(bus), "seats_free": seats_free(bus),
+        "seat_source": seat_source(bus), "seats_seen": bus["seat_cam"]["total"] if bus["seat_cam"] else None,
         "status": bus["status"], "location": bus["location"], "eta": eta(bus), "updated_at": bus["updated_at"],
     }
 
@@ -179,7 +204,8 @@ def my_bus(student_id: str):
 @app.post("/buses/{bus_id}/count")
 async def report_count(bus_id: int, body: CountIn):
     bus = buses.get(bus_id) or _404()
-    bus["count"] = max(body.count, 0)
+    bus["count"] = body.count
+    bus["seat_cam"] = {"free": body.seats_free, "total": body.seats_total} if body.seats_total else None
     touch(bus)
     await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     if seats_free(bus) == 0:
