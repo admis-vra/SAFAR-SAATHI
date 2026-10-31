@@ -803,12 +803,14 @@ async def my_fallback(lat: float | None = None, lng: float | None = None,
 async def set_my_home(body: HomeIn, student: dict = Depends(require_passenger)):
     # Coarse on purpose (~100 m): enough to find a nearby stop, not an exact address.
     await db.set_home(student["id"], round(body.lat, 3), round(body.lng, 3))
+    student["has_home"] = True
     return {"home": {"lat": round(body.lat, 3), "lng": round(body.lng, 3)}}
 
 
 @app.delete("/me/home")
 async def clear_my_home(student: dict = Depends(require_passenger)):
     await db.set_home(student["id"], None, None)
+    student["has_home"] = False
     return {"home": None}
 
 

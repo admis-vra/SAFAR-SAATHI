@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { homeFor } from './api'
 import { roleOf, supabase, supabaseConfigured } from './supabase'
+import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Office from './pages/Office'
 import Passenger from './pages/Passenger'
+import Settings from './pages/Settings'
 import Staff from './pages/Staff'
 
 function useSupabaseSession() {
@@ -29,7 +31,10 @@ function Routed() {
 
   return (
     <Routes>
-      <Route path="/" element={session ? <Navigate to={homeFor(session)} replace /> : <Login />} />
+      <Route path="/" element={session ? <Navigate to={homeFor(session)} replace /> : <Landing />} />
+      <Route path="/login" element={session ? <Navigate to={homeFor(session)} replace /> : <Login />} />
+      <Route path="/settings"
+        element={guard(['passenger', 'driver', 'conductor', 'dispatcher'], <Settings session={session} />)} />
       <Route path="/passenger" element={guard(['passenger'], <Passenger />)} />
       <Route path="/staff" element={guard(['driver', 'conductor'], <Staff />)} />
       <Route path="/office" element={guard(['dispatcher'], <Office />)} />

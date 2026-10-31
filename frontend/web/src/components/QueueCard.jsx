@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { notify } from '../prefs'
 
 const CALL_WINDOW_S = 300
 
@@ -27,9 +28,17 @@ export default function QueueCard({ tick, onError }) {
   const [data, setData] = useState(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const lastStatus = useRef(null)
 
   useEffect(() => {
-    api('/me/queue').then(setData).catch(onError)
+    api('/me/queue').then((d) => {
+      const status = d.token?.status ?? null
+      if (status === 'called' && lastStatus.current === 'waiting') {
+        notify('Your turn to board!', `Board Bus ${d.queue.bus_id} within 5 minutes and show your screen.`)
+      }
+      lastStatus.current = status
+      setData(d)
+    }).catch(onError)
   }, [tick, onError])
 
   const t = data?.token

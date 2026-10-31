@@ -46,7 +46,7 @@ def run(coro):
 
 async def _fetch(sql, *args):
     import asyncpg
-    conn = await asyncpg.connect(TEST_DSN, statement_cache_size=0)
+    conn = await asyncpg.connect(TEST_DSN, statement_cache_size=0, timeout=20, command_timeout=60)
     try:
         return await conn.fetch(sql, *args)
     finally:
@@ -55,7 +55,7 @@ async def _fetch(sql, *args):
 
 async def _execute(sql, *args):
     import asyncpg
-    conn = await asyncpg.connect(TEST_DSN, statement_cache_size=0)
+    conn = await asyncpg.connect(TEST_DSN, statement_cache_size=0, timeout=20, command_timeout=60)
     try:
         return await conn.execute(sql, *args)
     finally:

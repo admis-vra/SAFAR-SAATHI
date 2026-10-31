@@ -1,18 +1,28 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { notify } from '../prefs'
 
 const canLocate = typeof window !== 'undefined' && window.isSecureContext && 'geolocation' in navigator
 
-export default function FallbackModal({ onClose, onError }) {
+// alert: opened because the last bus just left (live), not just a check when the app opens
+export default function FallbackModal({ onClose, onError, alert = false }) {
   const [data, setData] = useState(null)
   const [here, setHere] = useState(null)
   const [locating, setLocating] = useState(false)
   const [locError, setLocError] = useState('')
+  const alerted = useRef(false)
 
   useEffect(() => {
     const q = here ? `?lat=${here.lat}&lng=${here.lng}` : ''
-    api(`/me/fallback${q}`).then(setData).catch(onError)
-  }, [here, onError])
+    api(`/me/fallback${q}`).then((d) => {
+      if (alert && d.needed && !alerted.current) {
+        alerted.current = true
+        notify('Your last bus has left', d.options.length ? `${d.options.length} other buses can still take you.`
+          : 'No other bus nearby has seats. Contact the transport office.')
+      }
+      setData(d)
+    }).catch(onError)
+  }, [here, onError, alert])
 
   // Location is asked for only when the student taps the button, used for this answer and never stored.
   const locate = () => {

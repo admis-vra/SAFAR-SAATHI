@@ -3,7 +3,8 @@ import { api, logout } from '../api'
 import { useLiveBuses, useRoutes } from '../live'
 import BusMap from '../components/BusMap'
 import { DEMO_PATH } from '../geo'
-import { Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
+import { BottomNav, Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
+import { notify, usePrefs } from '../prefs'
 
 const GPS_SEND_MS = 5000
 const SIM_STEP_MS = 3000
@@ -30,6 +31,9 @@ export default function Staff() {
 
   const { buses, connected } = useLiveBuses((msg) => {
     if (msg.type === 'alert' && msg.bus_id === busId) setNotice(msg.message)
+    if (msg.type === 'incident' && msg.kind === 'sos' && msg.bus_id === busId && msg.open === false) {
+      notify('SOS acknowledged', 'The control room has seen your SOS and will call you.')
+    }
     if ((msg.type === 'queue' || msg.type === 'token_called') && msg.bus_id === busId) setQueueTick((t) => t + 1)
     clearTimeout(reloadTimer.current)
     reloadTimer.current = setTimeout(loadRiders, 400)
@@ -59,8 +63,8 @@ export default function Staff() {
   }
 
   return (
-    <div className="app">
-      <TopBar title={`${me.name} · ${isDriver ? 'Driver' : 'Conductor'}`} subtitle={`Bus ${bus.id}`} connected={connected} />
+    <div className="app has-bottom-nav">
+      <TopBar title={`${me.name} · ${isDriver ? 'Driver' : 'Conductor'}`} subtitle={`Bus ${bus.id}`} connected={connected} home="/staff" />
 
       <main className="content">
         {error && <div className="alert bad" role="alert">{error}</div>}
@@ -115,7 +119,7 @@ export default function Staff() {
 
         {isDriver ? <GpsShare busId={bus.id} onError={fail} /> : <ManualCount bus={bus} onError={fail} />}
 
-        <section className="card">
+        <section className="card" id="live-map">
           <div className="eyebrow">Live map</div>
           <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={bus.route_id} focusId={bus.id}
             height={220} />
@@ -136,11 +140,13 @@ export default function Staff() {
           )}
         </section>
       </main>
+      <BottomNav home="/staff" />
     </div>
   )
 }
 
 function TripState({ bus }) {
+  const { hindi } = usePrefs()
   const t = bus.trip ?? {}
   const [en, hi, tone] = t.in_depot ? ['At campus', 'कैंपस में', 'neutral']
     : t.at_stop ? [`At stop ${t.at_stop}`, `स्टॉप ${t.at_stop} पर`, 'good']
@@ -149,7 +155,7 @@ function TripState({ bus }) {
   return (
     <section className={`card trip-state ${tone}`}>
       <div className="eyebrow">Trip · automatic</div>
-      <div className="trip-state-main">{en} <span className="muted" lang="hi">· {hi}</span></div>
+      <div className="trip-state-main">{en} {hindi && <span className="muted" lang="hi">· {hi}</span>}</div>
       <div className="tiny muted">
         {t.id ? `Trip ${t.id} started automatically when the bus left campus.` :
           'The trip starts by itself when the bus leaves campus. Nothing to press.'}
@@ -270,10 +276,11 @@ function StaffQueue({ busId, tick, onError }) {
 }
 
 function BigButton({ en, hi, tone, active, onClick }) {
+  const { hindi } = usePrefs()
   return (
     <button className={`big-btn ${tone} ${active ? 'active' : ''}`} onClick={onClick} aria-pressed={active}>
       <span className="big-btn-en">{en}</span>
-      <span className="big-btn-hi" lang="hi">{hi}</span>
+      {hindi && <span className="big-btn-hi" lang="hi">{hi}</span>}
     </button>
   )
 }

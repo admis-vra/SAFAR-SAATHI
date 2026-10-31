@@ -5,7 +5,7 @@ import { useLiveBuses } from '../live'
 import BusMap from '../components/BusMap'
 import FallbackModal from '../components/FallbackModal'
 import QueueCard from '../components/QueueCard'
-import { Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
+import { BottomNav, Eta, SeatMeter, StatusPill, TopBar } from '../components/ui'
 
 const EXAM_SLOTS = ['09:00', '11:00', '14:00']
 
@@ -90,7 +90,7 @@ export default function Passenger() {
   if (needsProfile) {
     return (
       <div className="app">
-        <TopBar title="Welcome" connected={connected} />
+        <TopBar title="Welcome" connected={connected} home="/passenger" />
         <main className="content">
           <section className="card">
             <h2>Finish your profile</h2>
@@ -103,9 +103,9 @@ export default function Passenger() {
   }
 
   return (
-    <div className="app">
+    <div className="app has-bottom-nav">
       <TopBar title={profile ? `Hi, ${profile.name.split(' ')[0]}` : 'Passenger'}
-        subtitle={profile && `${route?.name ?? ''} · Stop ${profile.stop}`} connected={connected} />
+        subtitle={profile && `${route?.name ?? ''} · Stop ${profile.stop}`} connected={connected} home="/passenger" />
 
       <main className="content">
         {error && <div className="alert bad">{error}</div>}
@@ -146,7 +146,7 @@ export default function Passenger() {
         )}
 
         {fallbackCheck > 0 && (
-          <FallbackModal key={fallbackCheck} onClose={() => setFallbackCheck(0)} onError={handleError} />
+          <FallbackModal key={fallbackCheck} alert={fallbackCheck > 1} onClose={() => setFallbackCheck(0)} onError={handleError} />
         )}
 
         {bus && <QueueCard key={bus.id} tick={queueTick} onError={handleError} />}
@@ -160,7 +160,7 @@ export default function Passenger() {
           </section>
         )}
 
-        <section className="card">
+        <section className="card" id="live-map">
           <div className="eyebrow">Live map</div>
           <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={profile?.route_id} focusId={bus?.id} />
         </section>
@@ -183,11 +183,12 @@ export default function Passenger() {
           )}
         </section>
       </main>
+      <BottomNav home="/passenger" />
     </div>
   )
 }
 
-function ProfileForm({ profile, routes, onSaved, onError, onCancel, stopOnly = false }) {
+export function ProfileForm({ profile, routes, onSaved, onError, onCancel, stopOnly = false }) {
   const [form, setForm] = useState({
     name: profile?.name ?? '',
     student_id: profile?.student_id ?? '',

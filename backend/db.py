@@ -8,7 +8,9 @@ pool: asyncpg.Pool | None = None
 async def connect(dsn: str):
     global pool
     # statement_cache_size=0 keeps us compatible with Supabase's transaction-mode pooler.
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, statement_cache_size=0)
+    # Timeouts: a stalled network call to the cloud database must fail, not hang a request forever.
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, statement_cache_size=0,
+                                     timeout=20, command_timeout=30)
 
 
 async def close():
@@ -235,7 +237,7 @@ async def upsert_profile(user_id: str, p: dict, stop_id: int):
 
 _PROFILE_SQL = """
     select p.id::text as id, p.student_id, p.name, p.default_route_id as route_id, s.stop_name as stop,
-           to_char(p.exam_slot, 'HH24:MI') as exam_slot
+           to_char(p.exam_slot, 'HH24:MI') as exam_slot, p.home_location is not null as has_home
     from profiles p join stops s on s.id = p.default_stop_id"""
 
 

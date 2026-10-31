@@ -53,7 +53,7 @@ export default function Office() {
 
   return (
     <div className="app">
-      <TopBar title="Control room" subtitle={`${list.length} buses`} connected={connected} />
+      <TopBar title="Control room" subtitle={`${list.length} buses`} connected={connected} home="/office" />
       <main className="content wide">
         {error && <div className="alert bad" role="alert">{error}</div>}
         {sos.map((i) => (

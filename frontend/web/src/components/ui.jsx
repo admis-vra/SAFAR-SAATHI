@@ -1,22 +1,67 @@
+import { Link, NavLink, useLocation } from 'react-router-dom'
 import { logout } from '../api'
+import Icon from './Icon'
 
-export function TopBar({ title, subtitle, connected }) {
+export function Logo({ size = 30 }) {
+  return <img src="/favicon.svg" width={size} height={size} alt="" className="logo" />
+}
+
+export function TopBar({ title, subtitle, connected, home = '/' }) {
+  const onSettings = useLocation().pathname === '/settings'
   return (
     <header className="topbar">
-      <div>
-        <div className="brand">SafarSaathi</div>
-        <div className="topbar-sub">
-          {title}
-          {subtitle && <span className="muted"> · {subtitle}</span>}
+      <Link to={home} className="topbar-left">
+        <Logo />
+        <div>
+          <div className="brand">SafarSaathi</div>
+          <div className="topbar-sub">
+            {title}
+            {subtitle && <span className="muted"> · {subtitle}</span>}
+          </div>
         </div>
-      </div>
+      </Link>
       <div className="topbar-right">
-        <span className={`live-dot ${connected ? 'on' : ''}`} title={connected ? 'Live' : 'Reconnecting…'}>
-          {connected ? 'Live' : 'Offline'}
-        </span>
-        <button className="btn ghost small" onClick={logout}>Log out</button>
+        {connected !== undefined && (
+          <span className={`live-dot ${connected ? 'on' : ''}`} title={connected ? 'Live' : 'Reconnecting…'}>
+            {connected ? 'Live' : 'Offline'}
+          </span>
+        )}
+        {!onSettings && (
+          <Link to="/settings" className="icon-btn topbar-settings" aria-label="Settings" title="Settings">
+            <Icon name="settings" />
+          </Link>
+        )}
+        <button className="icon-btn" onClick={logout} aria-label="Log out" title="Log out">
+          <Icon name="logout" />
+        </button>
       </div>
     </header>
+  )
+}
+
+// Phone-style bottom navigation; hidden on wide screens where the top bar is enough.
+export function BottomNav({ home, mapTarget = 'live-map' }) {
+  const scrollToMap = () => document.getElementById(mapTarget)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  return (
+    <nav className="bottom-nav" aria-label="Main">
+      <NavLink to={home} end><Icon name="home" /><span>Home</span></NavLink>
+      <button type="button" onClick={scrollToMap}><Icon name="map" /><span>Map</span></button>
+      <NavLink to="/settings"><Icon name="settings" /><span>Settings</span></NavLink>
+    </nav>
+  )
+}
+
+export function Toggle({ checked, onChange, label, hint, disabled }) {
+  return (
+    <label className={`toggle-row ${disabled ? 'disabled' : ''}`}>
+      <span>
+        <span className="toggle-label">{label}</span>
+        {hint && <span className="tiny muted toggle-hint">{hint}</span>}
+      </span>
+      <input type="checkbox" role="switch" checked={checked} disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)} />
+      <span className="toggle-track" aria-hidden="true"><span className="toggle-thumb" /></span>
+    </label>
   )
 }
 
