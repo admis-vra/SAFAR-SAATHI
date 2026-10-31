@@ -47,7 +47,8 @@ async def load_buses() -> list[dict]:
                s.status, st_y(s.location::geometry) as lat, st_x(s.location::geometry) as lng,
                s.speed_kmh, s.people_count, s.cam_seats_free, s.cam_seats_total, s.ir_net, s.last_device_ts,
                s.ir_offset, s.fused_seats_free, s.updated_at,
-               (select t.id from active_trips t where t.bus_id = b.id and t.end_time is null) as trip_id
+               (select t.id from active_trips t where t.bus_id = b.id and t.end_time is null) as trip_id,
+               (select max(t.start_time) from active_trips t where t.bus_id = b.id) as last_trip_start
         from buses b left join bus_live_state s on s.bus_id = b.id
         order by b.id""")
     return [{
@@ -62,7 +63,7 @@ async def load_buses() -> list[dict]:
         "seat_cam": ({"free": r["cam_seats_free"], "total": r["cam_seats_total"]}
                      if r["cam_seats_total"] else None),
         "updated_at": r["updated_at"].isoformat(timespec="seconds") if r["updated_at"] else None,
-        "trip_id": r["trip_id"], "assigned": 0,
+        "trip_id": r["trip_id"], "last_trip_start": r["last_trip_start"], "assigned": 0,
     } for r in rows]
 
 
@@ -243,3 +244,100 @@ async def get_profile(user_id: str) -> dict | None:
 
 async def all_profiles() -> list[dict]:
     return [dict(r) for r in await pool.fetch(_PROFILE_SQL)]
+
+
+# ---------- digital queue tokens ----------
+
+class AlreadyQueued(Exception):
+    pass
+
+
+_ACTIVE = "('waiting', 'called')"
+
+
+async def join_queue(student_id: str, bus_id: int, day: date) -> dict:
+    async with pool.acquire() as c, c.transaction():
+        # Serialize joins per queue so positions are 1, 2, 3... with no gaps or duplicates.
+        await c.execute("select pg_advisory_xact_lock($1, $2)", bus_id, day.toordinal())
+        await c.execute(f"update digital_tokens set status = 'expired', closed_at = now() "
+                        f"where student_id = $1::uuid and status in {_ACTIVE} and service_date < $2", student_id, day)
+        if await c.fetchval(f"select id from digital_tokens where student_id = $1::uuid and status in {_ACTIVE}",
+                            student_id):
+            raise AlreadyQueued()
+        row = await c.fetchrow("""
+            insert into digital_tokens (student_id, bus_id, service_date, queue_position)
+            select $1::uuid, $2, $3, coalesce(max(queue_position), 0) + 1
+            from digital_tokens where bus_id = $2 and service_date = $3
+            returning id, queue_position""", student_id, bus_id, day)
+        return dict(row)
+
+
+async def student_token(student_id: str, day: date) -> dict | None:
+    row = await pool.fetchrow(f"""
+        select t.id, t.bus_id, t.queue_position as position, t.status::text as status, t.created_at, t.called_at,
+               (select count(*) from digital_tokens o where o.bus_id = t.bus_id and o.service_date = t.service_date
+                  and o.status in {_ACTIVE} and o.queue_position < t.queue_position) as ahead
+        from digital_tokens t where t.student_id = $1::uuid and t.service_date = $2
+        order by t.id desc limit 1""", student_id, day)
+    return dict(row) if row else None
+
+
+async def cancel_token(student_id: str) -> dict | None:
+    row = await pool.fetchrow(f"""
+        update digital_tokens set status = 'cancelled', closed_at = now()
+        where student_id = $1::uuid and status in {_ACTIVE} returning id, bus_id""", student_id)
+    return dict(row) if row else None
+
+
+async def count_promised(bus_id: int, day: date, sensors_since: datetime | None) -> int:
+    """Seats already spoken for: called tokens, plus students marked boarded after the last occupancy reading
+    (sensors haven't counted them yet, so their seat still looks free)."""
+    return await pool.fetchval("""
+        select count(*) from digital_tokens where bus_id = $1 and service_date = $2
+          and (status = 'called' or (status = 'boarded' and ($3::timestamptz is null or closed_at > $3)))""",
+        bus_id, day, sensors_since)
+
+
+async def call_next(bus_id: int, day: date, n: int) -> list[dict]:
+    if n <= 0:
+        return []
+    rows = await pool.fetch("""
+        update digital_tokens set status = 'called', called_at = now()
+        where id in (select id from digital_tokens where bus_id = $1 and service_date = $2 and status = 'waiting'
+                     order by queue_position limit $3 for update skip locked)
+        returning id, queue_position""", bus_id, day, n)
+    return [dict(r) for r in rows]
+
+
+async def expire_tokens(call_window_s: int, today: date) -> list[dict]:
+    rows = await pool.fetch(f"""
+        update digital_tokens set status = 'expired', closed_at = now()
+        where (status = 'called' and called_at < now() - make_interval(secs => $1))
+           or (status in {_ACTIVE} and service_date < $2)
+        returning id, bus_id""", call_window_s, today)
+    return [dict(r) for r in rows]
+
+
+async def close_queue(bus_id: int, day: date) -> int:
+    """The bus has left: whoever is still waiting or called missed it."""
+    return int((await pool.execute(f"update digital_tokens set status = 'expired', closed_at = now() "
+                                   f"where bus_id = $1 and service_date = $2 and status in {_ACTIVE}",
+                                   bus_id, day)).split()[-1])
+
+
+async def mark_token(bus_id: int, token_id: int, status: str, at: datetime) -> bool:
+    # `at` comes from the backend clock, the same clock as occupancy_seen_at it's compared against.
+    row = await pool.fetchval("""
+        update digital_tokens set status = $3::token_status, closed_at = $4
+        where id = $2 and bus_id = $1 and status = 'called' returning id""", bus_id, token_id, status, at)
+    return row is not None
+
+
+async def queue_board(bus_id: int, day: date) -> list[dict]:
+    rows = await pool.fetch("""
+        select t.id, t.queue_position as position, t.status::text as status, t.created_at, t.called_at,
+               p.name, p.student_id
+        from digital_tokens t join profiles p on p.id = t.student_id
+        where t.bus_id = $1 and t.service_date = $2 order by t.queue_position""", bus_id, day)
+    return [{**dict(r), "created_at": r["created_at"].isoformat(),
+             "called_at": r["called_at"].isoformat() if r["called_at"] else None} for r in rows]

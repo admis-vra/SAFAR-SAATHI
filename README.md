@@ -45,6 +45,9 @@ Tests (need a disposable database with PostGIS, never the demo project):
 ```bash
 cd backend && .venv/Scripts/pip install -r requirements-dev.txt
 # backend/.env.test: TEST_DATABASE_URL=...   (+ TEST_AUTH_STUB=1 for plain local Postgres)
+# Optional switches:
+#   TEST_ALLOW_AUTH_ROWS=1  queue tests may create placeholder auth.users rows (no email/password), deleted after
+#   TEST_SKIP_MIGRATE=1     don't auto-apply pending migrations (e.g. another branch's unfinished one)
 .venv/Scripts/python -m pytest tests -q
 ```
 
@@ -116,6 +119,23 @@ Trips start and end from the bus's own GPS, so the driver doesn't need to tap an
 - **Known gap:** trips are detected when they **start at campus** (afternoon departures, which the last-bus
   feature needs). Morning trips that start at stop A aren't auto-detected yet.
 
+### Digital queue tokens (afternoon departures)
+
+Instead of rushing the bus door, students join a queue for their assigned bus and get called when there's a seat.
+
+- **One queue per bus departure per day.** It opens 30 min before the scheduled departure and closes when the bus
+  actually leaves (geofence or driver), so a late bus keeps its queue. Anyone still waiting when it leaves has
+  missed it (their token becomes `expired`; M6 will offer them a fallback route).
+- **Fair positions:** joins are serialized with a per-queue database lock, and a unique index makes duplicate
+  positions impossible. Each student can hold one active token.
+- **Calling:** while the bus status is `boarding`, the backend calls the next N waiting tokens, where
+  N = free seats (fused count, M4) minus seats already promised: called tokens, plus students marked boarded since
+  the last sensor reading (their seat still looks free until IR/camera count them, so without this the queue would
+  over-call). Called students have **5 min** to board, then the
+  token expires and the next person is called. The conductor marks `boarded` or `no_show`. Calls are re-checked
+  every 5 s and immediately on any change.
+- **Token states:** `waiting → called → boarded | no_show | expired`, or `cancelled` by the student.
+
 ### Website (passenger + driver/conductor)
 
 ```bash
@@ -182,12 +202,17 @@ Base URL: `http://<host>:8000`. All JSON. 🔒 = needs `Authorization: Bearer <S
 | POST | `/buses/{id}/sos` 🔒 | driver/conductor **of that bus** | opens (or returns) the bus's SOS incident → `{incident_id}` |
 | GET | `/incidents?open=true` 🔒 | dispatcher | open SOS / device-offline incidents with location (`open=false` = last 200) |
 | POST | `/incidents/{id}/ack` 🔒 | dispatcher | acknowledge; the only way an SOS closes |
+| GET | `/me/queue` 🔒 | passenger | `{queue: {state: not_open\|open\|closed, opens_at, departs_at}, token: {position, ahead, status, likely_seat}}` |
+| POST | `/me/queue` 🔒 | passenger | join your bus's queue (409 if not open, already left, or already queued) |
+| DELETE | `/me/queue` 🔒 | passenger | cancel your token |
+| GET | `/buses/{id}/queue` 🔒 | staff of that bus, dispatcher | queue columns: waiting / called / boarded / no_show / expired / cancelled |
+| POST | `/buses/{id}/queue/{token}/boarded\|no_show` 🔒 | driver/conductor **of that bus** | close a called token |
 | GET | `/buses/{id}/passengers` 🔒 | driver/conductor **of that bus** | students booked on the bus, in stop order |
 | POST | `/ingest/telemetry` | bus device (`X-Device-Token`) | one blueprint payload → `{accepted, duplicates, live_updated}` |
 | POST | `/ingest/backlog` | bus device (`X-Device-Token`) | array of payloads (≤2000), stored as history |
 | GET | `/planner?slot=11:00` | dashboard | students per route for an exam slot + extra-trip suggestions (≥30 students) |
 | GET | `/dashboard/summary` | dashboard | buses, totals, half-empty and full bus ids |
-| WS | `/ws` | student app, dashboard | pushes `{type:"buses",data:[...]}`, `{type:"bus",data:BusView}`, `{type:"alert",bus_id,message}`, `{type:"incident",id,bus_id,kind,open,late?,location?}`, `{type:"trip_event",bus_id,kind,stop,ts}` |
+| WS | `/ws` | student app, dashboard | pushes `{type:"buses",data:[...]}`, `{type:"bus",data:BusView}`, `{type:"alert",bus_id,message}`, `{type:"incident",id,bus_id,kind,open,late?,location?}`, `{type:"trip_event",bus_id,kind,stop,ts}`, `{type:"queue",bus_id}` (refetch), `{type:"token_called",bus_id,token_id,position,board_within_s}` |
 
 `BusView`:
 

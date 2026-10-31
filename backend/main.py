@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 import db
 import fusion
 import ingest
+import queueing
 from auth import current_user
 from eta import predict_delay_minutes
 from geofence import BusFence, Zone
@@ -25,6 +26,7 @@ EXTRA_TRIP_THRESHOLD = 30
 OFFLINE_AFTER_S = 30
 OFFLINE_CHECK_EVERY_S = 5
 LATE_AFTER_S = 120  # data older than this updates history but never sends live alerts
+QUEUE_CHECK_EVERY_S = 5
 
 routes: dict[int, dict] = {}
 stop_ids: dict[tuple[int, str], int] = {}
@@ -94,11 +96,12 @@ async def lifespan(_app: FastAPI):
         subscriber.start()
     else:
         log.warning("MQTT_URL not set: MQTT ingest disabled (HTTP /ingest still works)")
-    watcher = asyncio.create_task(watch_offline())
+    watchers = [asyncio.create_task(watch_offline()), asyncio.create_task(watch_queues())]
     yield
-    watcher.cancel()
-    with suppress(asyncio.CancelledError):
-        await watcher
+    for w in watchers:
+        w.cancel()
+        with suppress(asyncio.CancelledError):
+            await w
     if subscriber:
         subscriber.stop()
     await db.close()
@@ -294,6 +297,7 @@ async def apply_device_telemetry(device_id: str, items: list[ingest.Telemetry], 
             bus["stationary_since"] = None
         bus["ir_net"] = latest.pax.net_current
         bus["ir_seen"] = time.monotonic()
+        bus["occupancy_seen_at"] = datetime.now(timezone.utc)
         await maybe_recalibrate(bus)
         bus["count"] = fusion.ir_people(bus)
         bus["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -321,6 +325,9 @@ async def maybe_recalibrate(bus: dict):
 async def start_trip(bus: dict):
     bus["trip_id"] = await db.open_trip(bus)
     bus["status"] = "departed"
+    bus["last_trip_start"] = queueing.now_ist().astimezone(timezone.utc)  # same clock as the queue window
+    if await db.close_queue(bus["id"], queueing.service_day(queueing.now_ist())):
+        await hub.broadcast({"type": "queue", "bus_id": bus["id"]})
 
 
 async def end_trip(bus: dict):
@@ -397,6 +404,39 @@ async def watch_offline():
             await check_offline(time.monotonic())
         except Exception:
             log.exception("offline check failed")
+
+
+async def refill_calls(bus: dict) -> list[dict]:
+    """While a bus is boarding, call as many waiting students as there are free seats not yet promised."""
+    if bus["status"] != "boarding":
+        return []
+    day = queueing.service_day(queueing.now_ist())
+    room = queueing.room_to_call(seats_free(bus),
+                                 await db.count_promised(bus["id"], day, bus.get("occupancy_seen_at")))
+    called = await db.call_next(bus["id"], day, room)
+    for t in called:
+        await hub.broadcast({"type": "token_called", "bus_id": bus["id"], "token_id": t["id"],
+                             "position": t["queue_position"], "board_within_s": queueing.CALL_WINDOW_S})
+    if called:
+        await hub.broadcast({"type": "queue", "bus_id": bus["id"]})
+    return called
+
+
+async def service_queues():
+    expired = await db.expire_tokens(queueing.CALL_WINDOW_S, queueing.service_day(queueing.now_ist()))
+    for bus_id in {t["bus_id"] for t in expired}:
+        await hub.broadcast({"type": "queue", "bus_id": bus_id})
+    for bus in buses.values():
+        await refill_calls(bus)
+
+
+async def watch_queues():
+    while True:
+        await asyncio.sleep(QUEUE_CHECK_EVERY_S)
+        try:
+            await service_queues()
+        except Exception:
+            log.exception("queue service failed")
 
 
 async def device_bus(x_device_token: str | None = Header(default=None)) -> dict:
@@ -543,6 +583,7 @@ async def report_count(bus_id: int, body: CountIn):
     bus["count"] = bus["cv_count"] = body.count
     bus["seat_cam"] = {"free": body.seats_free, "total": body.seats_total} if body.seats_total else None
     bus["cv_seen"] = time.monotonic()
+    bus["occupancy_seen_at"] = datetime.now(timezone.utc)
     await maybe_recalibrate(bus)
     bus["fused_seats_free"] = seats_free(bus)
     await persist(bus)
@@ -576,6 +617,7 @@ async def report_status(bus_id: int, body: StatusIn, user: dict = Depends(requir
                                detail=f"{body.status} by {user['name']} ({user['role']})")
     await persist(bus, telemetry=False)
     await hub.broadcast({"type": "bus", "data": bus_view(bus)})
+    await refill_calls(bus)
     return bus_view(bus)
 
 
@@ -592,6 +634,82 @@ def require_dispatcher(user: dict = Depends(current_user)) -> dict:
     if user["role"] != "dispatcher":
         raise HTTPException(403, "Dispatchers only.")
     return user
+
+
+def require_bus_staff_or_dispatcher(bus_id: int, user: dict = Depends(current_user)) -> dict:
+    if user["role"] == "dispatcher":
+        return user
+    return require_bus_staff(bus_id, user)
+
+
+# ---------- digital queue (afternoon departures) ----------
+
+def queue_info(bus: dict) -> dict:
+    w = queueing.window(bus["departure"], queueing.now_ist(), bus.get("last_trip_start"))
+    return {"bus_id": bus["id"], "state": w.state, "opens_at": w.opens_at.strftime("%H:%M"),
+            "departs_at": w.departs_at.strftime("%H:%M"), "bus_status": bus["status"]}
+
+
+@app.get("/me/queue")
+async def my_queue(student: dict = Depends(require_passenger)):
+    bus = buses.get(student.get("bus_id"))
+    token = await db.student_token(student["id"], queueing.service_day(queueing.now_ist()))
+    if token:
+        token["created_at"] = token["created_at"].isoformat()
+        token["called_at"] = token["called_at"].isoformat() if token["called_at"] else None
+        token["likely_seat"] = token["status"] == "called" or (
+            token["status"] == "waiting" and bus is not None and token["ahead"] < seats_free(bus))
+    return {"queue": queue_info(bus) if bus else None, "token": token}
+
+
+@app.post("/me/queue")
+async def join_my_queue(student: dict = Depends(require_passenger)):
+    bus = buses.get(student.get("bus_id"))
+    if bus is None:
+        raise HTTPException(409, "You have no bus assigned to join a queue for.")
+    info = queue_info(bus)
+    if info["state"] == "not_open":
+        raise HTTPException(409, f"The queue for Bus {bus['id']} opens at {info['opens_at']}.")
+    if info["state"] == "closed":
+        raise HTTPException(409, f"Bus {bus['id']} has already left today.")
+    try:
+        token = await db.join_queue(student["id"], bus["id"], queueing.service_day(queueing.now_ist()))
+    except db.AlreadyQueued:
+        raise HTTPException(409, "You are already in a queue. Cancel it first to join another.")
+    await hub.broadcast({"type": "queue", "bus_id": bus["id"]})
+    await refill_calls(bus)
+    return await my_queue(student)
+
+
+@app.delete("/me/queue")
+async def leave_my_queue(student: dict = Depends(require_passenger)):
+    token = await db.cancel_token(student["id"])
+    if token is None:
+        raise HTTPException(404, "You are not in a queue.")
+    await hub.broadcast({"type": "queue", "bus_id": token["bus_id"]})
+    if token["bus_id"] in buses:
+        await refill_calls(buses[token["bus_id"]])
+    return {"cancelled": token["id"]}
+
+
+@app.get("/buses/{bus_id}/queue")
+async def bus_queue(bus_id: int, _: dict = Depends(require_bus_staff_or_dispatcher)):
+    bus = buses.get(bus_id) or _404()
+    tokens = await db.queue_board(bus_id, queueing.service_day(queueing.now_ist()))
+    columns = {s: [t for t in tokens if t["status"] == s]
+               for s in ("waiting", "called", "boarded", "no_show", "expired", "cancelled")}
+    return {"queue": queue_info(bus), "seats_free": seats_free(bus), "columns": columns}
+
+
+@app.post("/buses/{bus_id}/queue/{token_id}/{outcome}")
+async def mark_queue_token(bus_id: int, token_id: int, outcome: str, _: dict = Depends(require_bus_staff)):
+    if outcome not in ("boarded", "no_show"):
+        raise HTTPException(400, "outcome must be boarded or no_show")
+    if not await db.mark_token(bus_id, token_id, outcome, datetime.now(timezone.utc)):
+        raise HTTPException(404, "No called token with that id on this bus.")
+    await hub.broadcast({"type": "queue", "bus_id": bus_id})
+    await refill_calls(buses[bus_id])
+    return {"token_id": token_id, "status": outcome}
 
 
 @app.get("/incidents")
