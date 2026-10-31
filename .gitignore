@@ -7,3 +7,6 @@ ml/artifacts/
 ml/trips_synthetic.csv
 vision/*.mp4
 .env
+.env.*
+!.env.example
+.pytest_cache/

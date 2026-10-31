@@ -3,5 +3,6 @@ uvicorn[standard]==0.32.*
 joblib
 PyJWT[crypto]
 python-dotenv
+asyncpg
 xgboost
 scikit-learn

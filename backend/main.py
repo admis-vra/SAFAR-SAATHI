@@ -1,29 +1,24 @@
-import json
 import math
+import os
 import random
-from datetime import datetime, timedelta
-from pathlib import Path
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+import db
 from auth import current_user
 from eta import predict_delay_minutes
 
-SEED = json.loads((Path(__file__).parent / "seed.json").read_text())
 EXTRA_TRIP_THRESHOLD = 30
 
-app = FastAPI(title="SafarSaathi API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-routes = {r["id"]: r for r in SEED["routes"]}
-buses = {
-    b["id"]: {**b, "count": None, "seat_cam": None, "assigned": 0, "status": "scheduled", "location": None,
-              "updated_at": None}
-    for b in SEED["buses"]
-}
+routes: dict[int, dict] = {}
+stop_ids: dict[tuple[int, str], int] = {}
+buses: dict[int, dict] = {}
 students: dict[str, dict] = {}
+exam_demand: list[dict] = []
 
 
 def _demo_exam_demand() -> list[dict]:
@@ -31,12 +26,41 @@ def _demo_exam_demand() -> list[dict]:
     plan = {1: (62, "09:00"), 2: (54, "11:00"), 3: (140, "11:00"), 4: (88, "14:00")}
     out = []
     for route_id, (n, slot) in plan.items():
-        stops = routes[route_id]["stops"]
-        out += [{"route_id": route_id, "stop": rng.choice(stops), "exam_slot": slot} for _ in range(n)]
+        if route_id in routes:
+            stops = routes[route_id]["stops"]
+            out += [{"route_id": route_id, "stop": rng.choice(stops), "exam_slot": slot} for _ in range(n)]
     return out
 
 
-exam_demand = _demo_exam_demand()
+async def load_state():
+    loaded_routes, loaded_stop_ids = await db.load_routes()
+    routes.clear(); routes.update(loaded_routes)
+    stop_ids.clear(); stop_ids.update(loaded_stop_ids)
+    buses.clear(); buses.update({b["id"]: b for b in await db.load_buses()})
+    students.clear()
+    exam_demand[:] = _demo_exam_demand()
+    for p in await db.all_profiles():
+        students[p["id"]] = p
+        result = allocate(p)
+        if result["bus"]:
+            p["bus_id"] = result["bus"]["id"]
+            buses[p["bus_id"]]["assigned"] += 1
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        raise RuntimeError("Set DATABASE_URL in backend/.env (see backend/.env.example)")
+    await db.connect(dsn)
+    await db.ensure_partitions()
+    await load_state()
+    yield
+    await db.close()
+
+
+app = FastAPI(title="SafarSaathi API", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 class StopIn(BaseModel):
@@ -147,8 +171,12 @@ def allocate(student: dict) -> dict:
     return {"bus": bus_view(primary), "alert": f"All buses for stop {student['stop']} are full."}
 
 
-def touch(bus: dict):
-    bus["updated_at"] = datetime.now().isoformat(timespec="seconds")
+async def persist(bus: dict, telemetry: bool = True):
+    now = datetime.now(timezone.utc)
+    bus["updated_at"] = now.astimezone().isoformat(timespec="seconds")
+    await db.save_live_state(bus)
+    if telemetry:
+        await db.insert_telemetry(bus, now)
 
 
 @app.get("/routes")
@@ -187,8 +215,10 @@ async def assign(student: dict) -> dict:
 
 async def save_profile(user_id: str, profile: ProfileIn) -> dict:
     validate_stop(profile.route_id, profile.stop)
+    data = profile.model_dump()
+    await db.upsert_profile(user_id, data, stop_ids[(profile.route_id, profile.stop)])
     student = students.setdefault(user_id, {"id": user_id})
-    student.update(profile.model_dump())
+    student.update(data)
     return await assign(student)
 
 
@@ -196,7 +226,12 @@ async def require_passenger(user: dict = Depends(current_user)) -> dict:
     if user["role"] != "passenger":
         raise HTTPException(403, "Passengers only.")
     if user["id"] not in students:
-        # Signup stores the profile in Supabase user_metadata, so it survives backend restarts.
+        stored = await db.get_profile(user["id"])
+        if stored:
+            students[user["id"]] = stored
+            await assign(stored)
+            return stored
+        # First visit after signup: the profile is still only in Supabase user_metadata.
         try:
             profile = ProfileIn.model_validate(user["user_metadata"])
             validate_stop(profile.route_id, profile.stop)
@@ -262,7 +297,7 @@ async def report_count(bus_id: int, body: CountIn):
     bus = buses.get(bus_id) or _404()
     bus["count"] = body.count
     bus["seat_cam"] = {"free": body.seats_free, "total": body.seats_total} if body.seats_total else None
-    touch(bus)
+    await persist(bus)
     await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     if seats_free(bus) == 0:
         await hub.broadcast({"type": "alert", "bus_id": bus_id, "message": f"Bus {bus_id} is full"})
@@ -273,7 +308,7 @@ async def report_count(bus_id: int, body: CountIn):
 async def report_location(bus_id: int, body: LocationIn, _: dict = Depends(require_bus_staff)):
     bus = buses.get(bus_id) or _404()
     bus["location"] = body.model_dump()
-    touch(bus)
+    await persist(bus)
     await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     return bus_view(bus)
 
@@ -284,7 +319,12 @@ async def report_status(bus_id: int, body: StatusIn, _: dict = Depends(require_b
         raise HTTPException(400, "status must be scheduled|boarding|departed|full")
     bus = buses.get(bus_id) or _404()
     bus["status"] = body.status
-    touch(bus)
+    if body.status == "departed":
+        bus["trip_id"] = await db.open_trip(bus)
+    elif body.status == "scheduled" and bus.get("trip_id"):
+        await db.close_trip(bus_id)
+        bus["trip_id"] = None
+    await persist(bus, telemetry=False)
     await hub.broadcast({"type": "bus", "data": bus_view(bus)})
     return bus_view(bus)
 

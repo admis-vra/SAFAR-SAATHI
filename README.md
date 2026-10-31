@@ -21,8 +21,31 @@ Use Python **3.12 or 3.13** (`py -3.13`). PyTorch/YOLO support for 3.14 is not g
 
 ```bash
 cd backend && py -3.13 -m venv .venv && .venv/Scripts/pip install -r requirements.txt
-cp .env.example .env    # then set SUPABASE_URL (see "Supabase setup")
+cp .env.example .env    # then set SUPABASE_URL and DATABASE_URL (see "Supabase setup" and "Database")
+.venv/Scripts/python migrate.py   # creates tables + sample data; safe to re-run
 .venv/Scripts/uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+### Database (Supabase Postgres + PostGIS)
+
+- Schema and sample data live in `supabase/migrations/*.sql`. `migrate.py` applies new files in order and
+  records them in `schema_migrations`. Each file is also safe to paste into the Supabase SQL editor again.
+- Enable **PostGIS** first: Supabase → Database → Extensions → `postgis`. The first migration also runs
+  `create extension if not exists postgis`.
+- `DATABASE_URL`: Supabase → **Connect** → *Transaction pooler* (port 6543). Server-side only.
+- Routes, stops and buses load from the database at startup. Each bus's latest status, location and counts are
+  written to `bus_live_state` on every change, and history goes to `telemetry` (partitioned by day), so a
+  backend restart restores the live picture. Student profiles live in `profiles`.
+- **Stop coordinates are samples.** Replace them using [docs/STOPS_TODO.md](docs/STOPS_TODO.md).
+- Deviation from the blueprint: there is **no `role` column**. Roles stay in Supabase `app_metadata`, which only
+  admins can change.
+
+Tests (need a disposable database with PostGIS, never the demo project):
+
+```bash
+cd backend && .venv/Scripts/pip install -r requirements-dev.txt
+# backend/.env.test: TEST_DATABASE_URL=...   (+ TEST_AUTH_STUB=1 for plain local Postgres)
+.venv/Scripts/python -m pytest tests -q
 ```
 
 Restart the server after editing backend code. `--reload` tends to hang on Windows.
@@ -138,7 +161,7 @@ Use two phones (or two browsers): one logged in as a student, one as the Bus 14 
 
 - ETA model is trained on **synthetic** data until real trip logs exist (`ml/artifacts/meta.json` says which). Say so if asked.
 - Seat-count accuracy (target ≥90% vs. manual count): measure it on your own clip, count 20 frames by hand, and report the real number.
-- Accounts live in Supabase, so they survive restarts. Bus state (counts, status, locations) is in backend memory and resets on restart; students' bus assignments are rebuilt from their Supabase profile when they next open the app.
+- Accounts, profiles and the latest bus state are stored in Supabase Postgres and survive restarts.
 - Login needs internet, since Supabase is a cloud service. Test the venue Wi-Fi early, and keep a phone hotspot as backup.
 - `/count` has no device key yet, so anyone on the network could post counts. It needs one before a real pilot.
-- Map positions (campus, route line) are approximate sample coordinates.
+- Map positions (campus, route line) and all stop coordinates in the database are approximate **sample** coordinates, not surveyed.
