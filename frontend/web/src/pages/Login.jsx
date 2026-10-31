@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { supabase } from '../supabase'
+import Icon from '../components/Icon'
 
 const EXAM_SLOTS = ['09:00', '11:00', '14:00']
 // Matches bulk_import_passengers.py: a bulk-imported student's email is deterministic from their student ID.
@@ -107,12 +108,45 @@ export default function Login() {
 
   return (
     <main className="login-page">
-      <section className="login-hero">
-        <div className="brand big">SafarSaathi</div>
-        <p>Which bus, which seat, what time — for every GEHU day-scholar.</p>
-      </section>
+      <div className="login-container">
+        <section className="login-hero">
+          <div className="campus-badge">Graphic Era Hill University · Dehradun</div>
+          <div className="brand big">SafarSaathi</div>
+          <p className="login-subtitle">Which bus, which seat, what time — for every GEHU day-scholar.</p>
+          
+          <div className="login-features">
+            <div className="login-feature-item">
+              <span className="login-feature-icon"><Icon name="seat" size={18} /></span>
+              <div>
+                <b>Live Seat Vacancy</b>
+                <span>Edge vision &amp; IR counting update free seats before you head to the gate</span>
+              </div>
+            </div>
+            <div className="login-feature-item">
+              <span className="login-feature-icon"><Icon name="clock" size={18} /></span>
+              <div>
+                <b>Stop-Accurate Live ETA</b>
+                <span>Bus GPS tracking gives arrival times for your exact pickup stop</span>
+              </div>
+            </div>
+            <div className="login-feature-item">
+              <span className="login-feature-icon"><Icon name="users" size={18} /></span>
+              <div>
+                <b>Smart Boarding Queue</b>
+                <span>Digital queue tokens for fair, calm boarding with zero pushing</span>
+              </div>
+            </div>
+            <div className="login-feature-item">
+              <span className="login-feature-icon"><Icon name="bus" size={18} /></span>
+              <div>
+                <b>Exam Shift Surge Dispatch</b>
+                <span>Extra campus buses scheduled automatically for 9 AM, 11 AM, and 2 PM shifts</span>
+              </div>
+            </div>
+          </div>
+        </section>
 
-      <section className="card login-card">
+        <section className="card login-card">
         <div className="tabs" role="tablist">
           <button role="tab" aria-selected={tab === 'passenger'} className={tab === 'passenger' ? 'active' : ''}
             onClick={() => switchTab('passenger')}>
@@ -206,7 +240,8 @@ export default function Login() {
             <p className="center muted small-text">Staff accounts are issued by the transport office.</p>
           )}
         </form>
-      </section>
+        </section>
+      </div>
     </main>
   )
 }

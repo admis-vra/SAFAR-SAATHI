@@ -64,7 +64,7 @@ export default function Staff() {
   }
 
   if (!me || !bus) {
-    return <div className="app"><main className="content">{error ? <div className="alert bad">{error}</div> : <div className="card skeleton">Loading…</div>}</main></div>
+    return <div className="app"><main className="content staff-content">{error ? <div className="alert bad">{error}</div> : <div className="card skeleton">Loading…</div>}</main></div>
   }
 
   return (
@@ -80,6 +80,9 @@ export default function Staff() {
             <button className="btn ghost small" onClick={() => setNotice('')}>OK</button>
           </div>
         )}
+
+        <div className="staff-grid">
+          <div className="staff-col-controls">
 
         <section className="card bus-card">
           <div className="bus-card-head">
@@ -127,26 +130,58 @@ export default function Staff() {
 
         {!isDriver && <ManualCount bus={bus} onError={fail} />}
 
-        <section className="card" id="live-map">
-          <div className="eyebrow">Live map</div>
-          <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={bus.route_id} focusId={bus.id}
-            height={220} />
-        </section>
-
-        <section className="card">
-          <div className="row-between">
-            <div className="eyebrow">Passengers booked ({riders.length})</div>
           </div>
-          {riders.length === 0 ? (
-            <p className="muted">No students assigned to this bus yet.</p>
-          ) : (
-            <ul className="riders">
-              {riders.map((r) => (
-                <li key={r.id}><span className="stop-chip">{r.stop}</span>{r.name}<span className="muted tiny"> · {r.id}</span></li>
-              ))}
-            </ul>
-          )}
-        </section>
+
+          <div className="staff-col-ops">
+            <section className="card desktop-map-card" id="live-map">
+              <div className="row-between map-head-row">
+                <div>
+                  <div className="eyebrow">Live Route Map</div>
+                  <div className="map-route-title">{routes.find((r) => r.id === bus.route_id)?.name ?? `Route ${bus.route_id}`}</div>
+                </div>
+                <div className="map-bus-badge">
+                  <span className="live-pulse" />
+                  <span>Bus {bus.id}</span>
+                </div>
+              </div>
+              <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={bus.route_id} focusId={bus.id}
+                height={280} />
+            </section>
+
+            <section className="card passenger-manifest-card">
+              <div className="row-between">
+                <div>
+                  <div className="eyebrow">Passenger manifest</div>
+                  <div className="manifest-count">{riders.length} student{riders.length === 1 ? '' : 's'} booked</div>
+                </div>
+              </div>
+              {riders.length === 0 ? (
+                <p className="muted">No students assigned to this bus yet.</p>
+              ) : (
+                <div className="manifest-wrap">
+                  <table className="manifest-table">
+                    <thead>
+                      <tr>
+                        <th>Stop</th>
+                        <th>Student Name</th>
+                        <th>Student ID</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {riders.map((r) => (
+                        <tr key={r.id}>
+                          <td><span className="stop-chip">{r.stop}</span></td>
+                          <td className="manifest-name">{r.name}</td>
+                          <td className="muted tiny">{r.id}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
       </main>
       <BottomNav home="/staff" />
     </div>

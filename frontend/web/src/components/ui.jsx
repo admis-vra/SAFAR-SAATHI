@@ -7,33 +7,90 @@ export function Logo({ size = 30 }) {
 }
 
 export function TopBar({ title, subtitle, connected, home = '/' }) {
-  const onSettings = useLocation().pathname === '/settings'
+  const location = useLocation()
+  const pathname = location.pathname
+  const onSettings = pathname === '/settings'
+  const isPassenger = home === '/passenger' || pathname.startsWith('/passenger')
+  const isStaff = home === '/staff' || pathname.startsWith('/staff')
+  const isOffice = home === '/office' || pathname.startsWith('/office')
+
   return (
     <header className="topbar">
-      <Link to={home} className="topbar-left">
-        <Logo />
-        <div>
-          <div className="brand">SafarSaathi</div>
-          <div className="topbar-sub">
-            {title}
-            {subtitle && <span className="muted"> · {subtitle}</span>}
+      <div className="topbar-main-wrap">
+        <Link to={home} className="topbar-left">
+          <Logo />
+          <div>
+            <div className="brand">SafarSaathi</div>
+            <div className="topbar-sub">
+              {title}
+              {subtitle && <span className="muted"> · {subtitle}</span>}
+            </div>
           </div>
+        </Link>
+
+        {/* Desktop Navigation Links (hidden on phone, visible on PC) */}
+        <nav className="desktop-nav" aria-label="Desktop primary">
+          {isPassenger && (
+            <>
+              <NavLink to="/passenger" end className={({ isActive }) => `desktop-nav-link ${isActive ? 'active' : ''}`}>
+                <Icon name="home" size={16} /> <span>Dashboard</span>
+              </NavLink>
+              <button type="button" className="desktop-nav-link" onClick={() => document.getElementById('live-map')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>
+                <Icon name="map" size={16} /> <span>Live Map</span>
+              </button>
+              <NavLink to="/settings" className={({ isActive }) => `desktop-nav-link ${isActive ? 'active' : ''}`}>
+                <Icon name="settings" size={16} /> <span>Settings</span>
+              </NavLink>
+            </>
+          )}
+
+          {isStaff && (
+            <>
+              <NavLink to="/staff" end className={({ isActive }) => `desktop-nav-link ${isActive ? 'active' : ''}`}>
+                <Icon name="bus" size={16} /> <span>Cockpit</span>
+              </NavLink>
+              <button type="button" className="desktop-nav-link" onClick={() => document.getElementById('live-map')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>
+                <Icon name="map" size={16} /> <span>Map</span>
+              </button>
+              <NavLink to="/settings" className={({ isActive }) => `desktop-nav-link ${isActive ? 'active' : ''}`}>
+                <Icon name="settings" size={16} /> <span>Settings</span>
+              </NavLink>
+            </>
+          )}
+
+          {isOffice && (
+            <>
+              <NavLink to="/office" end className={({ isActive }) => `desktop-nav-link ${isActive ? 'active' : ''}`}>
+                <Icon name="bus" size={16} /> <span>Control room</span>
+              </NavLink>
+              <NavLink to="/office/analytics" className={({ isActive }) => `desktop-nav-link ${isActive ? 'active' : ''}`}>
+                <Icon name="chart" size={16} /> <span>Analytics</span>
+              </NavLink>
+              <NavLink to="/office/admin" className={({ isActive }) => `desktop-nav-link ${isActive ? 'active' : ''}`}>
+                <Icon name="settings" size={16} /> <span>Buses &amp; stops</span>
+              </NavLink>
+              <NavLink to="/settings" className={({ isActive }) => `desktop-nav-link ${isActive ? 'active' : ''}`}>
+                <Icon name="user" size={16} /> <span>Settings</span>
+              </NavLink>
+            </>
+          )}
+        </nav>
+
+        <div className="topbar-right">
+          {connected !== undefined && (
+            <span className={`live-dot ${connected ? 'on' : ''}`} title={connected ? 'Live' : 'Reconnecting…'}>
+              {connected ? 'Live' : 'Offline'}
+            </span>
+          )}
+          {!onSettings && (
+            <Link to="/settings" className="icon-btn topbar-settings" aria-label="Settings" title="Settings">
+              <Icon name="settings" />
+            </Link>
+          )}
+          <button className="icon-btn" onClick={logout} aria-label="Log out" title="Log out">
+            <Icon name="logout" />
+          </button>
         </div>
-      </Link>
-      <div className="topbar-right">
-        {connected !== undefined && (
-          <span className={`live-dot ${connected ? 'on' : ''}`} title={connected ? 'Live' : 'Reconnecting…'}>
-            {connected ? 'Live' : 'Offline'}
-          </span>
-        )}
-        {!onSettings && (
-          <Link to="/settings" className="icon-btn topbar-settings" aria-label="Settings" title="Settings">
-            <Icon name="settings" />
-          </Link>
-        )}
-        <button className="icon-btn" onClick={logout} aria-label="Log out" title="Log out">
-          <Icon name="logout" />
-        </button>
       </div>
     </header>
   )

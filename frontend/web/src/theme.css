@@ -231,3 +231,414 @@ textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px
 .gps-card.on { border: 1.5px solid var(--good); }
 .loc-age { display: inline-flex; align-items: center; gap: 6px; }
 .loc-age.stale { color: var(--warn); font-weight: 600; }
+
+
+/* ==========================================================================
+   PHONE vs PC (DESKTOP) RESPONSIVE DESIGN SYSTEM
+   ========================================================================== */
+
+/* TopBar responsive enhancements */
+.topbar-main-wrap {
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.desktop-nav {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  background: rgb(255 255 255 / 0.08);
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+}
+
+.desktop-nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #cbd5e1;
+  text-decoration: none;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.desktop-nav-link:hover {
+  color: #fff;
+  background: rgb(255 255 255 / 0.12);
+}
+
+.desktop-nav-link.active {
+  color: #fff;
+  background: var(--blue);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
+}
+
+@media (min-width: 768px) {
+  .desktop-nav { display: flex; }
+  .topbar-settings { display: none; }
+}
+
+/* Page Containers */
+.content.passenger-content,
+.content.staff-content,
+.content.settings-content {
+  max-width: 560px;
+  width: 100%;
+  margin: 0 auto;
+  transition: max-width 0.2s ease, padding 0.2s ease;
+}
+
+/* Phone Layout Defaults */
+.passenger-grid,
+.staff-grid,
+.settings-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.passenger-col-main,
+.passenger-col-map,
+.staff-col-controls,
+.staff-col-ops,
+.settings-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Map card styling */
+.desktop-map-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.map-head-row {
+  margin-bottom: 4px;
+}
+
+.map-route-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.map-bus-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.live-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2563eb;
+  box-shadow: 0 0 0 3px rgb(37 99 235 / 0.3);
+  animation: pulse 1.8s infinite;
+}
+
+@keyframes pulse {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgb(37 99 235 / 0.7); }
+  70% { transform: scale(1); box-shadow: 0 0 0 6px rgb(37 99 235 / 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgb(37 99 235 / 0); }
+}
+
+/* Route stops sequence ribbon */
+.route-stops-bar {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.stops-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.stop-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+  transition: all 0.15s ease;
+}
+
+.stop-pill.current {
+  background: var(--info-bg);
+  border-color: var(--blue);
+  color: var(--blue);
+  box-shadow: 0 0 0 2px rgb(37 99 235 / 0.15);
+}
+
+.stop-pill .stop-num {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--chip);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.stop-pill.current .stop-num {
+  background: var(--blue);
+  color: #fff;
+}
+
+.stop-pill .stop-tag {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--blue);
+  color: #fff;
+  padding: 1px 5px;
+  border-radius: 999px;
+}
+
+/* Staff Passenger Manifest Table */
+.passenger-manifest-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.manifest-count {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--navy);
+}
+
+.manifest-wrap {
+  overflow-x: auto;
+  max-height: 420px;
+  overflow-y: auto;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+.manifest-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.manifest-table th, .manifest-table td {
+  padding: 9px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.manifest-table th {
+  background: var(--surface-2);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.manifest-table tr:hover {
+  background: var(--surface-2);
+}
+
+.manifest-name {
+  font-weight: 600;
+}
+
+/* Login Page Responsive Styles */
+.login-container {
+  width: 100%;
+  max-width: 440px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-items: center;
+}
+
+.campus-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.12);
+  color: #fef08a;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+.login-features {
+  display: none;
+}
+
+/* ==========================================================================
+   DESKTOP (PC) SCREENS: min-width: 960px
+   ========================================================================== */
+@media (min-width: 960px) {
+  /* Expand content width on PC */
+  .content.passenger-content,
+  .content.staff-content,
+  .content.settings-content {
+    max-width: 1240px;
+    padding: 24px 32px 56px;
+    gap: 24px;
+  }
+
+  /* Passenger 2-column layout */
+  .passenger-grid {
+    display: grid;
+    grid-template-columns: minmax(420px, 480px) 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+
+  .passenger-col-map {
+    position: sticky;
+    top: 84px;
+  }
+
+  .passenger-col-map .map {
+    height: 480px !important;
+  }
+
+  /* Staff 2-column operational cockpit */
+  .staff-grid {
+    display: grid;
+    grid-template-columns: minmax(420px, 480px) 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+
+  .staff-col-ops {
+    position: sticky;
+    top: 84px;
+  }
+
+  .staff-col-ops .map {
+    height: 320px !important;
+  }
+
+  /* Settings 2-column grid */
+  .settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+
+  /* Login Split Screen */
+  .login-page {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 40px 24px;
+  }
+
+  .login-container {
+    max-width: 1040px;
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    gap: 52px;
+    align-items: center;
+  }
+
+  .login-hero {
+    text-align: left;
+    max-width: none;
+    margin-bottom: 0;
+  }
+
+  .login-hero .brand.big {
+    font-size: 2.8rem;
+    background: linear-gradient(90deg, #fbbf24, #60a5fa);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .login-subtitle {
+    font-size: 1.1rem;
+    line-height: 1.5;
+  }
+
+  .login-features {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 24px;
+  }
+
+  .login-feature-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: rgb(255 255 255 / 0.08);
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px solid rgb(255 255 255 / 0.12);
+    backdrop-filter: blur(8px);
+  }
+
+  .login-feature-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: var(--amber);
+    color: #0f172a;
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+  }
+
+  .login-feature-item b {
+    display: block;
+    font-size: 0.95rem;
+    color: #fff;
+  }
+
+  .login-feature-item span {
+    font-size: 0.82rem;
+    color: #cbd5e1;
+    line-height: 1.4;
+  }
+
+  .login-card {
+    box-shadow: 0 16px 36px rgb(0 0 0 / 0.25);
+    border: 1px solid var(--line);
+  }
+}

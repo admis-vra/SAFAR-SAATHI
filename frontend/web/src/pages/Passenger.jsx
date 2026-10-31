@@ -119,7 +119,7 @@ export default function Passenger() {
     return (
       <div className="app">
         <TopBar title="Welcome" connected={connected} home="/passenger" />
-        <main className="content">
+        <main className="content passenger-content">
           <section className="card">
             <h2>Finish your profile</h2>
             <p className="muted">Tell us your stop so we can assign your bus.</p>
@@ -135,10 +135,13 @@ export default function Passenger() {
       <TopBar title={profile ? `Hi, ${profile.name.split(' ')[0]}` : 'Passenger'}
         subtitle={profile && `${route?.name ?? ''} · Stop ${profile.stop}`} connected={connected} home="/passenger" />
 
-      <main className="content">
+      <main className="content passenger-content">
         {error && <div className="alert bad">{error}</div>}
         <Announcements routeId={profile?.route_id} tick={annTick} />
         {mine?.alert && <div className="alert warn big-alert" role="alert">{mine.alert}</div>}
+
+        <div className="passenger-grid">
+          <div className="passenger-col-main">
 
         {!mine && !error && <div className="card skeleton">Finding your bus…</div>}
 
@@ -220,29 +223,59 @@ export default function Passenger() {
           </section>
         )}
 
-        <section className="card" id="live-map">
-          <div className="eyebrow">Live map</div>
-          <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={profile?.route_id} focusId={bus?.id} />
-          <LocationAge bus={bus ? buses[bus.id] ?? bus : null} />
-        </section>
+            <section className="card">
+              {!editing ? (
+                <div className="row-between">
+                  <div>
+                    <div className="eyebrow">My stop</div>
+                    <div>{route?.name} · Stop {profile?.stop}{profile?.exam_slot && ` · Exam ${profile.exam_slot}`}</div>
+                  </div>
+                  <button className="btn ghost small" onClick={() => setEditing(true)}>Change</button>
+                </div>
+              ) : (
+                <>
+                  <div className="eyebrow">Change my stop</div>
+                  <ProfileForm profile={profile} routes={routes} onSaved={onSaved} onError={handleError}
+                    onCancel={() => setEditing(false)} stopOnly />
+                </>
+              )}
+            </section>
+          </div>
 
-        <section className="card">
-          {!editing ? (
-            <div className="row-between">
-              <div>
-                <div className="eyebrow">My stop</div>
-                <div>{route?.name} · Stop {profile?.stop}{profile?.exam_slot && ` · Exam ${profile.exam_slot}`}</div>
+          <div className="passenger-col-map">
+            <section className="card desktop-map-card" id="live-map">
+              <div className="row-between map-head-row">
+                <div>
+                  <div className="eyebrow">Live Route Map</div>
+                  <div className="map-route-title">{route?.name ?? 'Campus Transit'}</div>
+                </div>
+                {bus && (
+                  <div className="map-bus-badge">
+                    <span className="live-pulse" />
+                    <span>Bus {bus.id} tracking</span>
+                  </div>
+                )}
               </div>
-              <button className="btn ghost small" onClick={() => setEditing(true)}>Change</button>
-            </div>
-          ) : (
-            <>
-              <div className="eyebrow">Change my stop</div>
-              <ProfileForm profile={profile} routes={routes} onSaved={onSaved} onError={handleError}
-                onCancel={() => setEditing(false)} stopOnly />
-            </>
-          )}
-        </section>
+              <BusMap buses={Object.values(buses)} routes={routes} highlightRoute={profile?.route_id} focusId={bus?.id} height={340} />
+              <LocationAge bus={bus ? buses[bus.id] ?? bus : null} />
+
+              {route && (
+                <div className="route-stops-bar">
+                  <div className="eyebrow">Route stops</div>
+                  <div className="stops-pills">
+                    {route.stops.map((s, idx) => (
+                      <span key={s} className={`stop-pill ${s === profile?.stop ? 'current' : ''}`}>
+                        <span className="stop-num">{idx + 1}</span>
+                        <span className="stop-char">Stop {s}</span>
+                        {s === profile?.stop && <span className="stop-tag">You</span>}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
       </main>
       <BottomNav home="/passenger" />
     </div>

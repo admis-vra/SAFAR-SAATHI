@@ -368,7 +368,7 @@ async def run_geofence(bus: dict, readings: list[ingest.Telemetry]) -> bool:
     """Feed readings (oldest first) through the bus's fences; returns True if a trip started or ended."""
     changed = False
     for r in readings:
-        if bus.get("fence_ts") and r.ts <= bus["fence_ts"]:
+        if bus.get("fence_ts") and r.ts < bus["fence_ts"]:
             continue  # out of order: already past this point
         bus["fence_ts"] = r.ts
         if not r.has_fix:

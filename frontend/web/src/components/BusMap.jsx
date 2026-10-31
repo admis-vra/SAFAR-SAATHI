@@ -61,7 +61,7 @@ export default function BusMap({ buses, routes = [], focusId, highlightRoute, he
 
   return (
     <div className="map" style={{ height }}>
-      <MapContainer key={focus ? `focus-${focusId}` : 'campus'} center={center} zoom={zoom} scrollWheelZoom={false}>
+      <MapContainer key={focus ? `focus-${focusId}` : 'campus'} center={center} zoom={zoom} scrollWheelZoom>
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"

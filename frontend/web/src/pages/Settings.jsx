@@ -38,11 +38,13 @@ export default function Settings({ session }) {
   return (
     <div className="app has-bottom-nav">
       <TopBar title="Settings" subtitle={ROLE_LABEL[role]} home={home} />
-      <main className="content">
+      <main className="content settings-content">
         {error && <div className="alert bad" role="alert">{error}</div>}
         {saved && <div className="alert good" role="status"><Icon name="check" size={16} /> {saved}</div>}
 
-        <section className="card settings-card">
+        <div className="settings-grid">
+          <div className="settings-col">
+            <section className="card settings-card">
           <h3 className="settings-title"><Icon name="user" /> Account</h3>
           <dl className="facts">
             <dt>Name</dt><dd>{me?.profile?.name ?? me?.name ?? '…'}</dd>
@@ -66,8 +68,11 @@ export default function Settings({ session }) {
           </>
         )}
 
-        <section className="card settings-card">
-          <h3 className="settings-title"><Icon name="sun" /> Appearance</h3>
+          </div>
+
+          <div className="settings-col">
+            <section className="card settings-card">
+              <h3 className="settings-title"><Icon name="sun" /> Appearance</h3>
           <div className="segmented wide" role="radiogroup" aria-label="Theme">
             {[['light', 'Light', 'sun'], ['dark', 'Dark', 'moon'], ['system', 'System', 'settings']].map(([v, l, i]) => (
               <button key={v} role="radio" aria-checked={prefs.theme === v} className={prefs.theme === v ? 'active' : ''}
@@ -114,9 +119,11 @@ export default function Settings({ session }) {
           </ul>
         </section>
 
-        <button className="btn ghost block danger-text" onClick={logout}>
-          <Icon name="logout" size={18} /> Log out
-        </button>
+            <button className="btn ghost block danger-text" onClick={logout}>
+              <Icon name="logout" size={18} /> Log out
+            </button>
+          </div>
+        </div>
       </main>
       {role !== 'dispatcher' && <BottomNav home={home} />}
     </div>
